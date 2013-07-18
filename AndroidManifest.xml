@@ -1,0 +1,21 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.mohammadag.sviewpowerampmetadata"
+    android:versionCode="1"
+    android:versionName="1.0" >
+
+    <uses-sdk
+        android:minSdkVersion="17"
+        android:targetSdkVersion="17" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@drawable/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/AppTheme" >
+        
+        <meta-data android:value="true" android:name="xposedmodule"/>
+        <meta-data android:value="2.0*" android:name="xposedminversion"/>
+        <meta-data android:value="Adds PowerAMP metadata to S View screen" android:name="xposeddescription"/>
+    </application>
+
+</manifest>
