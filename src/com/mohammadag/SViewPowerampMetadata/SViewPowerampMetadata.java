@@ -10,8 +10,12 @@ import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Bundle;
 import android.text.TextUtils;
+import android.view.MotionEvent;
+import android.view.MotionEvent.PointerCoords;
 import android.view.View;
+import android.view.View.OnTouchListener;
 import android.widget.ImageView;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import com.maxmpz.audioplayer.player.PowerAMPiAPI;
@@ -23,6 +27,10 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 
 public class SViewPowerampMetadata implements IXposedHookLoadPackage {
+	
+	static final int MIN_DISTANCE = 100;
+    private PointerCoords mDownPos = new PointerCoords();
+    private PointerCoords mUpPos = new PointerCoords();
 	
 	private Context mContext = null;
 	private TextView mTrackTitle = null;
@@ -40,6 +48,8 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage {
 	private String mTrackTitleString = "";
 	private String mArtistNameString = "";
 	private Bitmap mAlbumArt = null;
+	
+	private LinearLayout mClockView;
 
 	public void handleLoadPackage(LoadPackageParam lpparam) throws Throwable {
 		if (!lpparam.packageName.equals("android"))
@@ -61,6 +71,8 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage {
 		
 		Class<?> MusicWidget = XposedHelpers.findClass("com.android.internal.policy.impl.sviewcover.SViewCoverWidget$MusicWidet",
 				lpparam.classLoader);
+		Class<?> ClockWidget = XposedHelpers.findClass("com.android.internal.policy.impl.sviewcover.SViewCoverWidget$Clock",
+				lpparam.classLoader);
 		
 		XposedHelpers.findAndHookMethod(MusicWidget, "onFinishInflate", new XC_MethodHook() {
 			@Override
@@ -81,6 +93,80 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage {
 				} else {
 					setVisibilityOfMusicWidgets(View.GONE);
 				}
+			}
+		});
+		
+		XposedHelpers.findAndHookMethod(ClockWidget, "onFinishInflate", new XC_MethodHook() {
+			@Override
+			protected void afterHookedMethod(MethodHookParam param) {
+				mClockView = (LinearLayout) getObjectField(param.thisObject, "mClockView");
+				mClockView.setOnTouchListener(new OnTouchListener() {
+					
+					@Override
+					public boolean onTouch(View v, MotionEvent event) {
+				        switch(event.getAction()) {
+			            // Capture the position where swipe begins
+			            case MotionEvent.ACTION_DOWN: {
+			                event.getPointerCoords(0, mDownPos);
+			                return true;
+			            }
+			 
+			            // Get the position where swipe ends
+			            case MotionEvent.ACTION_UP: {
+			                event.getPointerCoords(0, mUpPos);
+			 
+			                float dx = mDownPos.x - mUpPos.x;
+			 
+			                // Check for horizontal wipe
+			                if (Math.abs(dx) > MIN_DISTANCE) {
+			                    if (dx > 0)
+			                        onSwipeLeft();
+			                    else
+			                        onSwipeRight();
+			                    return true;
+			                }
+			 
+			                float dy = mDownPos.y - mUpPos.y;
+			 
+			                // Check for vertical wipe
+			                if (Math.abs(dy) > MIN_DISTANCE) {
+			                    if (dy > 0)
+			                        onSwipeUp();
+			                    else
+			                        onSwipeDown();
+			                    return true;
+			                }
+			            }
+			        }
+			        return false;
+					}
+
+					private void onSwipeDown() {
+						// TODO Auto-generated method stub
+						
+					}
+
+					private void onSwipeUp() {
+						// TODO Auto-generated method stub
+						
+					}
+
+					private void onSwipeRight() {
+						if (mContext != null) {
+							Intent powerampActionIntent = new Intent(PowerAMPiAPI.ACTION_API_COMMAND);
+							powerampActionIntent.putExtra(PowerAMPiAPI.COMMAND, PowerAMPiAPI.Commands.NEXT);
+							mContext.startService(powerampActionIntent);
+						}
+					}
+
+					private void onSwipeLeft() {
+						if (mContext != null) {
+							Intent powerampActionIntent = new Intent(PowerAMPiAPI.ACTION_API_COMMAND);
+							powerampActionIntent.putExtra(PowerAMPiAPI.COMMAND, PowerAMPiAPI.Commands.PREVIOUS);
+							mContext.startService(powerampActionIntent);
+						}
+					}
+				});
 			}
 		});
 		
