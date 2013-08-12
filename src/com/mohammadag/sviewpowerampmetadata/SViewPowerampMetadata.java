@@ -53,11 +53,11 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 	public static final String SETTINGS_UPDATED_INTENT = "com.mohammadag.sviewpowerampmetadata.SETTINGS_UPDATED";
 	
 	// Gesture related fields
-    private PointerCoords mDownPos = new PointerCoords();
-    private PointerCoords mUpPos = new PointerCoords();
-    private OnLongClickListener mLongClickListener = null;
+	private PointerCoords mDownPos = new PointerCoords();
+	private PointerCoords mUpPos = new PointerCoords();
+	private OnLongClickListener mLongClickListener = null;
 	
-    // Pointers to fields from S-View classes
+	// Pointers to fields from S-View classes
 	private Context mContext = null;
 	private TextView mTrackTitle = null;
 	private ImageView mAlbumArtWithImage = null;
