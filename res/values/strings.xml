@@ -2,4 +2,12 @@
 
     <string name="app_name">S View Poweramp Metadata</string>
 
+    <string name="pref_title_media_player">Media Player to use</string>
+
+    <string name="pref_title_longpress_title">Long press to pause/play</string>
+
+    <string name="pref_description_longpress">Long press S-View screen to toggle playback</string>
+
+    <string name="pref_description_media_player">Select media player to control when skipping tracks</string>
+
 </resources>
