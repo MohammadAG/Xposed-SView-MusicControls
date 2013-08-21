@@ -1,17 +1,25 @@
 package com.mohammadag.sviewpowerampmetadata;
 
+import static de.robv.android.xposed.XposedHelpers.findAndHookMethod;
+import static de.robv.android.xposed.XposedHelpers.findClass;
 import static de.robv.android.xposed.XposedHelpers.getObjectField;
 
+import java.io.FileNotFoundException;
+import java.io.IOException;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Method;
 
 import android.app.PendingIntent;
 import android.app.PendingIntent.CanceledException;
 import android.content.BroadcastReceiver;
+import android.content.ComponentName;
+import android.content.ContentResolver;
+import android.content.ContentUris;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.media.AudioManager;
 import android.media.IRemoteControlDisplay;
 import android.media.MediaMetadataRetriever;
@@ -21,7 +29,9 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
+import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
+import android.os.UserHandle;
 import android.text.TextUtils;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
@@ -38,6 +48,7 @@ import com.maxmpz.audioplayer.player.PowerAMPiAPI;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.IXposedHookZygoteInit;
 import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XC_MethodHook.MethodHookParam;
 import de.robv.android.xposed.XSharedPreferences;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
@@ -88,24 +99,28 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 	// Our own handler to handle metadata changes
 	public Handler myHandler = null;
 	
+	// Avoid system warnings
+	private UserHandle mCurrentUserHandle = null;
+	
 	// Settings keys
 	private static final String SETTINGS_LONGPRESS_KEY = "longpress_to_toggle_playback";
 	private static final String SETTINGS_MEDIAPLAYER_KEY = "current_media_player";
 	
 	// Mediaplayer values
-	private static final String POWERAMP_MEDIAPLAYER = "poweramp";
+	private static final String POWERAMP_MEDIAPLAYER = "com.maxmpz.audioplayer";
+	private static final String GOOGLEPLAY_MEDIAPLAYER = "com.android.music";
 	private static final String EMULATE_MEDIA_KEYS_MEDIAPLAYER = "emulate_media_buttons";
 	
 	// Lockscreen specific fields
-	private int mClientGeneration;
 	private PendingIntent mClientIntent;
-	public static final int MSG_SET_ARTWORK = 104;
-	public static final int MSG_SET_GENERATION_ID = 103;
-	public static final int MSG_SET_METADATA = 101;
-	public static final int MSG_SET_TRANSPORT_CONTROLS = 102;
-	public static final int MSG_UPDATE_STATE = 100;
 	
 	private static XSharedPreferences prefs;
+	
+	private enum MusicServiceCommands {
+		PLAY_PAUSE,
+		NEXT,
+		PREVIOUS
+	}
 
 	public void initZygote(StartupParam startupParam) {
 		prefs = new XSharedPreferences(PACKAGE_NAME);
@@ -115,8 +130,61 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		if (!lpparam.packageName.equals("android"))
 			return;
 		
+		doRemoteControlHooks(lpparam);
+		
 		if (prefs != null)
 			prefs.reload();
+		
+		mCurrentUserHandle = (UserHandle) XposedHelpers.getStaticObjectField(UserHandle.class, "CURRENT");
+		
+		final OnTouchListener gestureListener = new OnTouchListener() {
+			@Override
+			public boolean onTouch(View v, MotionEvent event) {
+		        switch(event.getAction()) {
+	            case MotionEvent.ACTION_DOWN: {
+	                event.getPointerCoords(0, mDownPos);
+	                return true;
+	            }
+	            
+	            case MotionEvent.ACTION_UP: {
+	                event.getPointerCoords(0, mUpPos);
+	 
+	                float dx = mDownPos.x - mUpPos.x;
+	                if (Math.abs(dx) > MIN_DISTANCE) {
+	                    if (dx > 0)
+	                        onSwipeLeft();
+	                    else
+	                        onSwipeRight();
+	                    return true;
+	                }
+	                
+	            	float dy = mDownPos.y - mUpPos.y;
+
+	            	// Check for vertical wipe
+	            	if (Math.abs(dy) > MIN_DISTANCE) {
+	            		if (dy > 0)
+	            			onSwipeUp();
+	            		else
+	            			onSwipeDown();
+	            		return true;
+	            	}
+	            }
+	        }
+	        return false;
+			}
+
+			private void onSwipeRight() {
+				previousTrack();
+				extendTimeout();
+			}
+
+			private void onSwipeLeft() {
+				nextTrack();
+				extendTimeout();
+			}
+			private void onSwipeUp() { }
+			private void onSwipeDown() { }
+		};
 		
 		XposedBridge.log("Initializing S View hooks...");
 		
@@ -139,7 +207,7 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 					mContext = (Context) getObjectField(param.thisObject, "mContext");
 				if (mHandler == null) {
 					mHandler = (Handler) getObjectField(param.thisObject, "mHandler");
-					initializeRemoteControlDisplay(mHandler.getLooper());
+					//initializeRemoteControlDisplay(mHandler.getLooper());
 				}
 				if (mGoToSleepRunnable == null)
 					mGoToSleepRunnable = (Runnable) getObjectField(param.thisObject, "mGoToSleepRunnable");
@@ -162,59 +230,24 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 			}
 		};
 		
-		final OnTouchListener gestureListener = new OnTouchListener() {
-			@Override
-			public boolean onTouch(View v, MotionEvent event) {
-		        switch(event.getAction()) {
-	            case MotionEvent.ACTION_DOWN: {
-	                event.getPointerCoords(0, mDownPos);
-	                return false;
-	            }
-	            
-	            case MotionEvent.ACTION_UP: {
-	                event.getPointerCoords(0, mUpPos);
-	 
-	                float dx = mDownPos.x - mUpPos.x;
-	                if (Math.abs(dx) > MIN_DISTANCE) {
-	                    if (dx > 0)
-	                        onSwipeLeft();
-	                    else
-	                        onSwipeRight();
-	                    return true;
-	                }
-	            }
-	        }
-	        return false;
-			}
-
-			private void onSwipeRight() {
-				extendTimeout();
-				previousTrack();
-			}
-
-			private void onSwipeLeft() {
-				extendTimeout();
-				nextTrack();
-			}
-		};
-		
 		XposedHelpers.findAndHookMethod(MusicWidget, "onFinishInflate", new XC_MethodHook() {
 			@Override
 			protected void afterHookedMethod(MethodHookParam param) {
+				XposedBridge.log("MusicWidget: onFinishInflate");
 				mMusicWidgetObject = param.thisObject;
-				
 				mTrackTitle = (TextView) getObjectField(param.thisObject, "mTrackTitle");
 				mTrackTitle.setOnTouchListener(gestureListener);
 				mAlbumArtWithImage = (ImageView) getObjectField(param.thisObject, "mAlbumArtWithImage");
 				
 				updateRemoteFieldsFromLocalFields();
 				
+				setTrackTitleText(getTextToSet(mTrackTitleString, mArtistNameString));
+				if (mAlbumArt != null) {
+					mAlbumArtWithImage.setImageBitmap(mAlbumArt);
+				}
+				
 				if (isPlaying) {
 					setVisibilityOfMusicWidgets(View.VISIBLE);
-					setTrackTitleText(getTextToSet(mTrackTitleString, mArtistNameString));
-					if (mAlbumArt != null) {
-						mAlbumArtWithImage.setImageBitmap(mAlbumArt);
-					}
 				} else {
 					setVisibilityOfMusicWidgets(View.GONE);
 				}
@@ -224,34 +257,60 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		XposedHelpers.findAndHookMethod(ClockWidget, "onFinishInflate", new XC_MethodHook() {
 			@Override
 			protected void afterHookedMethod(MethodHookParam param) {
+				XposedBridge.log("ClockWidget: onFinishInflate");
 				mClockView = (LinearLayout) getObjectField(param.thisObject, "mClockView");
 				mClockView.setOnTouchListener(gestureListener);
+				//initializeRemoteControlDisplay(mHandler.getLooper());
 			}
 		});
 		
 		loadSettings();
 	}
 	
+	private void doRemoteControlHooks(LoadPackageParam lpparam) {
+		XC_MethodHook setPlaybackStateHook = new XC_MethodHook() {
+			@Override
+			protected void beforeHookedMethod(MethodHookParam param) {
+				int state = (Integer) param.args[0];
+				updatePlayPauseState(state);
+			}
+		};
+		
+		for (Method method: RemoteControlClient.class.getMethods()) {
+			if (method.getName().equals("setPlaybackState")) {
+				XposedBridge.hookMethod(method, setPlaybackStateHook);
+			}
+		}
+		
+		findAndHookMethod(RemoteControlClient.MetadataEditor.class, "apply", new XC_MethodHook() {
+			@Override
+			protected void beforeHookedMethod(MethodHookParam param) {
+				Bundle mEditorMetadata = (Bundle) getObjectField(param.thisObject, "mEditorMetadata");
+				boolean isArtworkExist = XposedHelpers.getBooleanField(param.thisObject, "mArtworkChanged");
+				if (isArtworkExist) {
+					Bitmap artwork = (Bitmap) getObjectField(param.thisObject, "mEditorArtwork");
+					setAlbumArt(artwork);
+				}
+				
+				updateMetadata(mEditorMetadata);
+			}
+		});
+	}
+
 	private void loadSettings() {
 		boolean enableLongPressToToggle = prefs.getBoolean(SETTINGS_LONGPRESS_KEY,	 false);
-		
-		if (mClockView != null)
-			mClockView.setHapticFeedbackEnabled(enableLongPressToToggle);
-		
-		if (mTrackTitle != null)
-			mTrackTitle.setHapticFeedbackEnabled(enableLongPressToToggle);
 		
 		if (enableLongPressToToggle) {
 			if (mTrackTitle != null)
 				mTrackTitle.setOnLongClickListener(mLongClickListener);
 			if (mClockView != null)
 				mClockView.setOnLongClickListener(mLongClickListener);
-		} else {
-			if (mTrackTitle != null)
-				mTrackTitle.setOnLongClickListener(null);
-			if (mClockView != null)
-				mClockView.setOnLongClickListener(null);
 		}
+		
+		if (mTrackTitle != null)
+			mTrackTitle.setHapticFeedbackEnabled(enableLongPressToToggle);
+		if (mClockView != null)
+			mClockView.setHapticFeedbackEnabled(enableLongPressToToggle);
 	}
 
 	protected void extendTimeout() {
@@ -330,7 +389,58 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		mAAIntent = mContext.registerReceiver(mAAReceiver, new IntentFilter(PowerAMPiAPI.ACTION_AA_CHANGED));
 		mTrackIntent = mContext.registerReceiver(mTrackReceiver, new IntentFilter(PowerAMPiAPI.ACTION_TRACK_CHANGED));
 		mStatusIntent = mContext.registerReceiver(mStatusReceiver, new IntentFilter(PowerAMPiAPI.ACTION_STATUS_CHANGED));
+
+	    IntentFilter iF = new IntentFilter();
+	    iF.addAction("com.android.music.metachanged");
+	    iF.addAction("com.htc.music.metachanged");
+	    iF.addAction("fm.last.android.metachanged");
+	    iF.addAction("com.sec.android.app.music.metachanged");
+	    iF.addAction("com.nullsoft.winamp.metachanged");
+	    iF.addAction("com.amazon.mp3.metachanged");     
+	    iF.addAction("com.miui.player.metachanged");        
+	    iF.addAction("com.real.IMP.metachanged");
+	    iF.addAction("com.sonyericsson.music.metachanged");
+	    iF.addAction("com.rdio.android.metachanged");
+	    iF.addAction("com.samsung.sec.android.MusicPlayer.metachanged");
+	    iF.addAction("com.andrew.apollo.metachanged");
+
+	    mContext.registerReceiver(metadataChangedReceiver, iF);
 	}
+	
+	private BroadcastReceiver metadataChangedReceiver = new BroadcastReceiver() {
+		@Override
+		public void onReceive(Context context, Intent intent) {
+			if (intent == null)
+				return;
+			
+			String currentMediaPlayer = prefs.getString(SETTINGS_MEDIAPLAYER_KEY, POWERAMP_MEDIAPLAYER);
+			if (currentMediaPlayer.equals(POWERAMP_MEDIAPLAYER) || intent.hasExtra("com.maxmpz.audioplayer.source"))
+				return;
+			
+			String title = "Unknown title";
+			String artist = "Unknown artist";
+			
+			if (intent.hasExtra("track"))
+				title = intent.getStringExtra("track");
+			
+			if (intent.hasExtra("artist"))
+				artist = intent.getStringExtra("artist");
+			
+			setTrackMetadata(title, artist);
+			
+			/*
+			if (intent.hasExtra("albumId")) {
+				long albumId = intent.getLongExtra("albumId", -1);
+				Bitmap albumArt = null;
+				albumArt = getAlbumartForAlbumId(context, albumId);
+				if (albumArt == null)
+					XposedBridge.log("Failed to get album art");
+				setAlbumArt(albumArt);
+			}*/
+			
+			updateRemoteFieldsFromLocalFields();
+		}
+	};
 	
 	private BroadcastReceiver mSettingsUpdatedReceiver = new BroadcastReceiver() {		
 		@Override
@@ -350,7 +460,18 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 			mCurrentTrack = null;
 			if (mTrackIntent != null) {
 				mCurrentTrack = mTrackIntent.getBundleExtra(PowerAMPiAPI.TRACK);
-				updateTrackUI();
+				String currentMediaPlayer = prefs.getString(SETTINGS_MEDIAPLAYER_KEY, POWERAMP_MEDIAPLAYER);
+				if (!currentMediaPlayer.equals(POWERAMP_MEDIAPLAYER))
+					return;
+				
+				String title, artist;
+				title = artist = null;
+				if (mTrackIntent != null) {
+					title = mCurrentTrack.getString(PowerAMPiAPI.Track.TITLE);
+					artist = mCurrentTrack.getString(PowerAMPiAPI.Track.ARTIST);
+				}
+				
+				setTrackMetadata(title, artist);
 			}
 		}
 	};
@@ -359,7 +480,26 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		@Override
 		public void onReceive(Context context, Intent intent) {
 			mAAIntent = intent;
-			updateAlbumArt();
+			String currentMediaPlayer = prefs.getString(SETTINGS_MEDIAPLAYER_KEY, POWERAMP_MEDIAPLAYER);
+			if (!currentMediaPlayer.equals(POWERAMP_MEDIAPLAYER))
+				return;
+			
+			String directAAPath = mAAIntent.getStringExtra(PowerAMPiAPI.ALBUM_ART_PATH);
+
+			 if (mAAIntent.hasExtra(PowerAMPiAPI.ALBUM_ART_BITMAP)) {
+				Bitmap albumArtBitmap = mAAIntent.getParcelableExtra(PowerAMPiAPI.ALBUM_ART_BITMAP);
+				if (albumArtBitmap != null) {
+					setAlbumArt(albumArtBitmap);
+				}
+			} else 	if (!TextUtils.isEmpty(directAAPath)) {
+				if (mAlbumArtWithImage != null) {
+					mAlbumArtWithImage.setImageURI(Uri.parse(directAAPath));
+				}
+			} else {
+				setAlbumArt(null);
+			}
+			 
+			 updateRemoteFieldsFromLocalFields();
 		}
 	};
 	
@@ -367,7 +507,38 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		@Override
 		public void onReceive(Context context, Intent intent) {
 			mStatusIntent = intent;
-			updateStatusUI();		
+			String currentMediaPlayer = prefs.getString(SETTINGS_MEDIAPLAYER_KEY, POWERAMP_MEDIAPLAYER);
+			if (!currentMediaPlayer.equals(POWERAMP_MEDIAPLAYER))
+				return;
+			
+			if (mStatusIntent != null) {
+				boolean paused = true;
+
+				int status = mStatusIntent.getIntExtra(PowerAMPiAPI.STATUS, -1);
+
+				switch (status) {
+					case PowerAMPiAPI.Status.TRACK_PLAYING:
+						paused = mStatusIntent.getBooleanExtra(PowerAMPiAPI.PAUSED, false);
+						break;
+
+					case PowerAMPiAPI.Status.TRACK_ENDED:
+					case PowerAMPiAPI.Status.PLAYING_ENDED:
+						break;
+				}
+				if (mMusicWidgetObject != null)
+					XposedHelpers.setBooleanField(mMusicWidgetObject, "mIsPlaying", !paused);
+				
+				if (paused) {
+					setVisibilityOfMusicWidgets(View.GONE);
+					
+				} else {
+					setVisibilityOfMusicWidgets(View.VISIBLE);
+				}
+				
+				isPlaying = !paused;
+			}
+			
+			updateRemoteFieldsFromLocalFields();	
 		}
 	};
 	
@@ -381,85 +552,12 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 			mAlbumArtWithImage.setVisibility(visibility);
 	}
 
-	protected void updateAlbumArt() {
-		String currentMediaPlayer = prefs.getString(SETTINGS_MEDIAPLAYER_KEY, POWERAMP_MEDIAPLAYER);
-		if (!currentMediaPlayer.equals(POWERAMP_MEDIAPLAYER))
-			return;
-		
-		String directAAPath = mAAIntent.getStringExtra(PowerAMPiAPI.ALBUM_ART_PATH);
-
-		 if (mAAIntent.hasExtra(PowerAMPiAPI.ALBUM_ART_BITMAP)) {
-			Bitmap albumArtBitmap = mAAIntent.getParcelableExtra(PowerAMPiAPI.ALBUM_ART_BITMAP);
-			if (albumArtBitmap != null) {
-				setAlbumArt(albumArtBitmap);
-			}
-		} else 	if (!TextUtils.isEmpty(directAAPath)) {
-			if (mAlbumArtWithImage != null) {
-				mAlbumArtWithImage.setImageURI(Uri.parse(directAAPath));
-			}
-		} else {
-			setAlbumArt(null);
-		}
-		 
-		 updateRemoteFieldsFromLocalFields();
-	}
-
-	protected void updateStatusUI() {
-		String currentMediaPlayer = prefs.getString(SETTINGS_MEDIAPLAYER_KEY, POWERAMP_MEDIAPLAYER);
-		if (!currentMediaPlayer.equals(POWERAMP_MEDIAPLAYER))
-			return;
-		
-		if (mStatusIntent != null) {
-			boolean paused = true;
-
-			int status = mStatusIntent.getIntExtra(PowerAMPiAPI.STATUS, -1);
-
-			switch (status) {
-				case PowerAMPiAPI.Status.TRACK_PLAYING:
-					paused = mStatusIntent.getBooleanExtra(PowerAMPiAPI.PAUSED, false);
-					break;
-
-				case PowerAMPiAPI.Status.TRACK_ENDED:
-				case PowerAMPiAPI.Status.PLAYING_ENDED:
-					break;
-			}
-			if (mMusicWidgetObject != null)
-				XposedHelpers.setBooleanField(mMusicWidgetObject, "mIsPlaying", !paused);
-			
-			if (paused) {
-				setVisibilityOfMusicWidgets(View.GONE);
-				
-			} else {
-				setVisibilityOfMusicWidgets(View.VISIBLE);
-			}
-			
-			isPlaying = !paused;
-		}
-		
-		updateRemoteFieldsFromLocalFields();
-	}
-
 	private void setTrackMetadata(String title, String artist) {
 		mTrackTitleString = title;
 		mArtistNameString = artist;
 		
 		setTrackTitleText(getTextToSet(mTrackTitleString, mArtistNameString));
 		updateRemoteFieldsFromLocalFields();
-	}
-	
-	private void updateTrackUI() {
-		String currentMediaPlayer = prefs.getString(SETTINGS_MEDIAPLAYER_KEY, POWERAMP_MEDIAPLAYER);
-		if (!currentMediaPlayer.equals(POWERAMP_MEDIAPLAYER))
-			return;
-		
-		String title, artist;
-		title = artist = null;
-		if (mTrackIntent != null) {
-			title = mCurrentTrack.getString(PowerAMPiAPI.Track.TITLE);
-			artist = mCurrentTrack.getString(PowerAMPiAPI.Track.ARTIST);
-		}
-		
-		setTrackMetadata(title, artist);
 	}
 	
 	private void nextTrack() {
@@ -471,10 +569,10 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		if (currentMediaPlayer.equals(POWERAMP_MEDIAPLAYER)) {
 			Intent powerampActionIntent = new Intent(PowerAMPiAPI.ACTION_API_COMMAND);
 			powerampActionIntent.putExtra(PowerAMPiAPI.COMMAND, PowerAMPiAPI.Commands.NEXT);
-			mContext.startService(powerampActionIntent);
-		}
-		
-		if (currentMediaPlayer.equals(EMULATE_MEDIA_KEYS_MEDIAPLAYER)) {
+			startServiceAsUser(powerampActionIntent, mCurrentUserHandle);
+		} else if (currentMediaPlayer.equals(GOOGLEPLAY_MEDIAPLAYER)) {
+			sendMusicServiceCommand(MusicServiceCommands.NEXT);
+		} else if (currentMediaPlayer.equals(EMULATE_MEDIA_KEYS_MEDIAPLAYER)) {
 			sendMediaButton(KeyEvent.KEYCODE_MEDIA_NEXT);
 		}
 	}
@@ -482,16 +580,16 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 	private void previousTrack() {
 		if (mContext == null)
 			return;
-		
+
 		String currentMediaPlayer = prefs.getString(SETTINGS_MEDIAPLAYER_KEY, POWERAMP_MEDIAPLAYER);
 		
 		if (currentMediaPlayer.equals(POWERAMP_MEDIAPLAYER)) {
 			Intent powerampActionIntent = new Intent(PowerAMPiAPI.ACTION_API_COMMAND);
 			powerampActionIntent.putExtra(PowerAMPiAPI.COMMAND, PowerAMPiAPI.Commands.PREVIOUS);
-			mContext.startService(powerampActionIntent);
-		}
-		
-		if (currentMediaPlayer.equals(EMULATE_MEDIA_KEYS_MEDIAPLAYER)) {
+			startServiceAsUser(powerampActionIntent, mCurrentUserHandle);
+		} else if (currentMediaPlayer.equals(GOOGLEPLAY_MEDIAPLAYER)) {
+			sendMusicServiceCommand(MusicServiceCommands.PREVIOUS);
+		} else if (currentMediaPlayer.equals(EMULATE_MEDIA_KEYS_MEDIAPLAYER)) {
 			sendMediaButton(KeyEvent.KEYCODE_MEDIA_PREVIOUS);
 		}
 	}
@@ -499,8 +597,6 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 	private void togglePlayback() {
 		if (mContext == null)
 			return;
-		
-		prefs.reload();
 		
 		if (!prefs.getBoolean(SETTINGS_LONGPRESS_KEY, false))
 			return;
@@ -510,139 +606,73 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		if (currentMediaPlayer.equals(POWERAMP_MEDIAPLAYER)) {
 			Intent powerampActionIntent = new Intent(PowerAMPiAPI.ACTION_API_COMMAND);
 			powerampActionIntent.putExtra(PowerAMPiAPI.COMMAND, PowerAMPiAPI.Commands.TOGGLE_PLAY_PAUSE);
-			mContext.startService(powerampActionIntent);
-		}
-		
-		if (currentMediaPlayer.equals(EMULATE_MEDIA_KEYS_MEDIAPLAYER)) {
+			startServiceAsUser(powerampActionIntent, mCurrentUserHandle);
+		} else if (currentMediaPlayer.equals(GOOGLEPLAY_MEDIAPLAYER)) {
+			sendMusicServiceCommand(MusicServiceCommands.PLAY_PAUSE);
+		} else if (currentMediaPlayer.equals(EMULATE_MEDIA_KEYS_MEDIAPLAYER)) {
 			sendMediaButton(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE);
 		}
 	}
 	
+	private void sendMusicServiceCommand(MusicServiceCommands command) {
+		sendMusicServiceCommand("com.android.music", command);
+	}
+	
+	private void sendMusicServiceCommand(String packageName, MusicServiceCommands command) {
+		Intent musicIntent = new Intent();
+		String action = packageName + ".musicservicecommand";
+
+		switch (command) {
+		case PLAY_PAUSE:
+			action = action + ".togglepause";
+			break;
+		case NEXT:
+			musicIntent.putExtra("command", "next");
+			break;
+		case PREVIOUS:
+			musicIntent.putExtra("command", "previous");
+			break;
+		default:
+			break;
+		}
+		
+		musicIntent.setAction(action);
+		sendBroadcastAsUser(musicIntent, mCurrentUserHandle);
+	}
+	
 	private void sendMediaButton(int keyCode) {
-		if (mClientIntent == null)
-			return;
-		
-		XposedBridge.log("Sending media button");
-		
 		KeyEvent keyEvent = new KeyEvent(KeyEvent.ACTION_DOWN, keyCode);
 		Intent intent = new Intent(Intent.ACTION_MEDIA_BUTTON);
 		intent.putExtra(Intent.EXTRA_KEY_EVENT, keyEvent);
-		try {
-		    mClientIntent.send(mContext, 0, intent);
-		} catch (CanceledException e) {
-			XposedBridge.log("Error sending intent for media button down");
-		    e.printStackTrace();
+		
+		if (mClientIntent != null) {
+			try {
+			    mClientIntent.send(mContext, 0, intent);
+			} catch (CanceledException e) {
+				XposedBridge.log("Error sending intent for media button down");
+			    e.printStackTrace();
+			}
+		} else {
+			sendOrderedBroadcastAsUser(intent, mCurrentUserHandle);
 		}
 
 		keyEvent = new KeyEvent(KeyEvent.ACTION_UP, keyCode);
 		intent = new Intent(Intent.ACTION_MEDIA_BUTTON);
 		intent.putExtra(Intent.EXTRA_KEY_EVENT, keyEvent);
-		try {
-		    mClientIntent.send(mContext, 0, intent);
-		} catch (CanceledException e) {
-		    XposedBridge.log("Error sending intent for media button up");
-		    e.printStackTrace();
-		}
-	}
-	
-	private void initializeRemoteControlDisplay(Looper looper) {
-		myHandler = new Handler(looper, new Handler.Callback() {
-	        @Override
-	        public boolean handleMessage(Message msg) {
-				switch (msg.what) {
-				case MSG_UPDATE_STATE:
-					if (mClientGeneration == msg.arg1)
-						updatePlayPauseState(msg.arg2);
-					break;
-				case MSG_SET_METADATA:
-					if (mClientGeneration == msg.arg1)
-						updateMetadata((Bundle) msg.obj);
-					break;
-				case MSG_SET_TRANSPORT_CONTROLS:
-					break;
-				case MSG_SET_GENERATION_ID:
-					mClientGeneration = msg.arg1;
-					mClientIntent = (PendingIntent) msg.obj;
-					break;
-				case MSG_SET_ARTWORK:
-					if (mClientGeneration == msg.arg1) {
-						if (mAlbumArt != null) {
-							mAlbumArt.recycle();
-						}
-						mAlbumArt = (Bitmap)msg.obj;
-						setAlbumArt(mAlbumArt);
-					}
-					break;
-				}
-				return true;
-	        }
-		});
 		
-		RemoteControlDisplay remoteDisplay = new RemoteControlDisplay(myHandler);
-		
-		AudioManager manager = (AudioManager) mContext.getSystemService(Context.AUDIO_SERVICE);
-		manager.registerRemoteControlDisplay(remoteDisplay);
-	}
-	
-	public class RemoteControlDisplay extends IRemoteControlDisplay.Stub {
-		static final int MSG_SET_ARTWORK = 104;
-		static final int MSG_SET_GENERATION_ID = 103;
-		static final int MSG_SET_METADATA = 101;
-		static final int MSG_SET_TRANSPORT_CONTROLS = 102;
-		static final int MSG_UPDATE_STATE = 100;
-
-		private WeakReference<Handler> mLocalHandler;
-
-		RemoteControlDisplay(Handler handler) {
-			mLocalHandler = new WeakReference<Handler>(handler);
-		}
-
-		public void setAllMetadata(int generationId, Bundle metadata, Bitmap bitmap) {
-			Handler handler = mLocalHandler.get();
-			if (handler != null) {
-				handler.obtainMessage(MSG_SET_METADATA, generationId, 0, metadata).sendToTarget();
-				handler.obtainMessage(MSG_SET_ARTWORK, generationId, 0, bitmap).sendToTarget();
+		if (mClientIntent != null) {
+			try {
+			    mClientIntent.send(mContext, 0, intent);
+			} catch (CanceledException e) {
+				XposedBridge.log("Error sending intent for media button up");
+			    e.printStackTrace();
 			}
-		}
-
-		public void setArtwork(int generationId, Bitmap bitmap) {
-			Handler handler = mLocalHandler.get();
-			if (handler != null) {
-				handler.obtainMessage(MSG_SET_ARTWORK, generationId, 0, bitmap).sendToTarget();
-			}
-		}
-
-		public void setCurrentClientId(int clientGeneration, PendingIntent mediaIntent,
-				boolean clearing) throws RemoteException {
-			Handler handler = mLocalHandler.get();
-			if (handler != null) {
-				handler.obtainMessage(MSG_SET_GENERATION_ID, clientGeneration, (clearing ? 1 : 0), mediaIntent).sendToTarget();
-			}
-		}
-
-		public void setMetadata(int generationId, Bundle metadata) {
-			Handler handler = mLocalHandler.get();
-			if (handler != null) {
-				handler.obtainMessage(MSG_SET_METADATA, generationId, 0, metadata).sendToTarget();
-			}
-		}
-
-		public void setPlaybackState(int generationId, int state, long stateChangeTimeMs) {
-			Handler handler = mLocalHandler.get();
-			if (handler != null) {
-				handler.obtainMessage(MSG_UPDATE_STATE, generationId, state).sendToTarget();
-			}
-		}
-				
-		public void setTransportControlFlags(int generationId, int flags) {
-			Handler handler = mLocalHandler.get();
-			if (handler != null) {
-				handler.obtainMessage(MSG_SET_TRANSPORT_CONTROLS, generationId, flags).sendToTarget();
-			}
+		} else {
+			sendOrderedBroadcastAsUser(intent, mCurrentUserHandle);
 		}
 	}
 	
-	protected void updatePlayPauseState(int playstate) {
+	public void updatePlayPauseState(int playstate) {
 		XposedBridge.log("updatePlayPauseState" + " " + playstate);
 		boolean playing = false;
 		if (playstate == RemoteControlClient.PLAYSTATE_PLAYING) {
@@ -681,4 +711,127 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 	private String getMdString(Bundle data, int id) {
 		return data.getString(Integer.toString(id));
 	}
-}
+	
+	private ComponentName startServiceAsUser(Intent intent, UserHandle user) {
+		if (mContext == null)
+			return null;
+		
+		if (user == null) {
+			// Oh well, we tried
+			return mContext.startService(intent);
+		}
+		
+		return (ComponentName) XposedHelpers.callMethod(mContext, "startServiceAsUser", intent, user);
+	}
+	
+	private void sendOrderedBroadcastAsUser(Intent intent, UserHandle user) {
+		if (mContext == null)
+			return;
+		
+		if (user == null) {
+			// Oh well, we tried again
+			mContext.sendOrderedBroadcast(intent, null);
+			return;
+		}
+		
+		mContext.sendOrderedBroadcastAsUser(intent, user, null, null, null, 0, null, null);
+	}
+	
+	private void sendBroadcastAsUser(Intent intent, UserHandle user) {
+		if (mContext == null)
+			return;
+		
+		if (user == null) {
+			// Oh well, we tried again and again
+			mContext.sendOrderedBroadcast(intent, null);
+			return;
+		}
+		
+		mContext.sendBroadcastAsUser(intent, user);
+	}
+	
+	public static Bitmap getAlbumartForAlbumId(Context context, Long album_id) {
+
+		if (context == null)
+			return null;
+		
+		return getArtworkQuick(context, album_id, 64, 64);
+		/*
+		Bitmap bm = null;
+		try {
+			final Uri sArtworkUri = Uri.parse("content://media/external/audio/albumart");
+
+			Uri uri = ContentUris.withAppendedId(sArtworkUri, album_id);
+
+			ParcelFileDescriptor pfd = context.getContentResolver().openFileDescriptor(uri, "r");
+
+			if (pfd != null) {
+				FileDescriptor fd = pfd.getFileDescriptor();
+				bm = BitmapFactory.decodeFileDescriptor(fd);
+			}
+		} catch (Exception e) {}
+	    return bm;
+	    */
+	}
+	
+	private static final BitmapFactory.Options sBitmapOptionsCache = new BitmapFactory.Options();
+	private static final Uri sArtworkUri = Uri.parse("content://media/external/audio/albumart");
+	
+    // Get album art for specified album. This method will not try to
+    // fall back to getting artwork directly from the file, nor will
+    // it attempt to repair the database.
+    private static Bitmap getArtworkQuick(Context context, Long album_id, int w, int h) {
+        // NOTE: There is in fact a 1 pixel frame in the ImageView used to
+        // display this drawable. Take it into account now, so we don't have to
+        // scale later.
+        w -= 2;
+        h -= 2;
+        ContentResolver res = context.getContentResolver();
+        Uri uri = ContentUris.withAppendedId(sArtworkUri, album_id);
+        if (uri != null) {
+            ParcelFileDescriptor fd = null;
+            try {
+                fd = res.openFileDescriptor(uri, "r");
+                int sampleSize = 1;
+                
+                // Compute the closest power-of-two scale factor 
+                // and pass that to sBitmapOptionsCache.inSampleSize, which will
+                // result in faster decoding and better quality
+                sBitmapOptionsCache.inJustDecodeBounds = true;
+                BitmapFactory.decodeFileDescriptor(
+                        fd.getFileDescriptor(), null, sBitmapOptionsCache);
+                int nextWidth = sBitmapOptionsCache.outWidth >> 1;
+                int nextHeight = sBitmapOptionsCache.outHeight >> 1;
+                while (nextWidth>w && nextHeight>h) {
+                    sampleSize <<= 1;
+                    nextWidth >>= 1;
+                    nextHeight >>= 1;
+                }
+
+                sBitmapOptionsCache.inSampleSize = sampleSize;
+                sBitmapOptionsCache.inJustDecodeBounds = false;
+                Bitmap b = BitmapFactory.decodeFileDescriptor(
+                        fd.getFileDescriptor(), null, sBitmapOptionsCache);
+
+                if (b != null) {
+                    // finally rescale to exactly the size we need
+                    if (sBitmapOptionsCache.outWidth != w || sBitmapOptionsCache.outHeight != h) {
+                        Bitmap tmp = Bitmap.createScaledBitmap(b, w, h, true);
+                        b.recycle();
+                        b = tmp;
+                    }
+                }
+                
+                return b;
+            } catch (FileNotFoundException e) {
+            } finally {
+                try {
+                    if (fd != null)
+                        fd.close();
+                } catch (IOException e) {
+                }
+            }
+        }
+        return null;
+    }
+ }
