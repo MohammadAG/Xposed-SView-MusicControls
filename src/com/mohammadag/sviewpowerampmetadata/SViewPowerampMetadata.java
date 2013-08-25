@@ -2,6 +2,9 @@ package com.mohammadag.sviewpowerampmetadata;
 
 import static de.robv.android.xposed.XposedHelpers.findAndHookMethod;
 import static de.robv.android.xposed.XposedHelpers.getObjectField;
+import static de.robv.android.xposed.XposedHelpers.getStaticObjectField;
+
+import static de.robv.android.xposed.XposedBridge.hookAllConstructors;
 
 import java.io.FileDescriptor;
 import java.lang.reflect.Method;
@@ -17,8 +20,6 @@ import android.content.IntentFilter;
 import android.content.res.XModuleResources;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
-import android.media.MediaMetadataRetriever;
-import android.media.RemoteControlClient;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -109,56 +110,54 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		if (!lpparam.packageName.equals("android"))
 			return;
 		
-		// doRemoteControlHooks(lpparam);
-		
 		if (prefs != null)
 			prefs.reload();
 		
 		modRes = XModuleResources.createInstance(MODULE_PATH, null);
 		
-		mCurrentUserHandle = (UserHandle) XposedHelpers.getStaticObjectField(UserHandle.class, "CURRENT");
+		mCurrentUserHandle = (UserHandle) getStaticObjectField(UserHandle.class, "CURRENT");
 		
 		final OnTouchListener gestureListener = new OnTouchListener() {
 			@Override
 			public boolean onTouch(View v, MotionEvent event) {
-		        switch(event.getAction()) {
-	            case MotionEvent.ACTION_DOWN: {
-	                event.getPointerCoords(0, mDownPos);
-	                return true;
-	            }
+				 switch(event.getAction()) {
+				 	case MotionEvent.ACTION_DOWN: {
+				 		event.getPointerCoords(0, mDownPos);
+				 		return true;
+				 	}
 	            
-	            case MotionEvent.ACTION_UP: {
-	                event.getPointerCoords(0, mUpPos);
+				 	case MotionEvent.ACTION_UP: {
+				 		event.getPointerCoords(0, mUpPos);
 	 
-	                float dx = mDownPos.x - mUpPos.x;
-	                if (Math.abs(dx) > Common.MIN_DISTANCE) {
-	                    if (dx > 0)
-	                        onSwipeLeft();
-	                    else
-	                        onSwipeRight();
-	                    return true;
-	                }
-	                
-	            	float dy = mDownPos.y - mUpPos.y;
-
-	            	// Check for vertical wipe
-	            	if (Math.abs(dy) > Common.MIN_DISTANCE) {
-	            		if (dy > 0)
-	            			onSwipeUp();
-	            		else
-	            			onSwipeDown();
-	            		return true;
-	            	}
-	            }
-	        }
-	        return false;
+						float dx = mDownPos.x - mUpPos.x;
+						if (Math.abs(dx) > Common.MIN_DISTANCE) {
+						    if (dx > 0)
+						        onSwipeLeft();
+						    else
+						        onSwipeRight();
+						    return true;
+						}
+						
+						float dy = mDownPos.y - mUpPos.y;
+						
+						// Check for vertical wipe
+						if (Math.abs(dy) > Common.MIN_DISTANCE) {
+							if (dy > 0)
+								onSwipeUp();
+							else
+								onSwipeDown();
+							return true;
+						}
+				 	}
+				 }
+				 return false;
 			}
 
 			private void onSwipeRight() {
 				previousTrack();
 				extendTimeout();
 			}
-
+			
 			private void onSwipeLeft() {
 				nextTrack();
 				extendTimeout();
@@ -174,21 +173,20 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		final Class<?> keyguardViewMediator = XposedHelpers.findClass("com.android.internal.policy.impl.keyguard.KeyguardViewMediator",
 				lpparam.classLoader);
 		
-		XposedBridge.hookAllConstructors(keyguardViewMediator, new XC_MethodHook() {
+		hookAllConstructors(keyguardViewMediator, new XC_MethodHook() {
 			@Override
 			protected void afterHookedMethod(MethodHookParam param) {
 				mKeyguardViewMediator = param.thisObject;
 			}
 		});
 		
-		XposedBridge.hookAllConstructors(SViewCoverManager, new XC_MethodHook() {
+		hookAllConstructors(SViewCoverManager, new XC_MethodHook() {
 			@Override
 			protected void afterHookedMethod(MethodHookParam param) {
 				if (mContext == null)
 					mContext = (Context) getObjectField(param.thisObject, "mContext");
-				if (mHandler == null) {
+				if (mHandler == null)
 					mHandler = (Handler) getObjectField(param.thisObject, "mHandler");
-				}
 				if (mGoToSleepRunnable == null)
 					mGoToSleepRunnable = (Runnable) getObjectField(param.thisObject, "mGoToSleepRunnable");
 				
@@ -210,7 +208,7 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 			}
 		};
 		
-		XposedHelpers.findAndHookMethod(MusicWidget, "onFinishInflate", new XC_MethodHook() {
+		findAndHookMethod(MusicWidget, "onFinishInflate", new XC_MethodHook() {
 			@Override
 			protected void afterHookedMethod(MethodHookParam param) {
 				mMusicWidgetObject = param.thisObject;
@@ -233,7 +231,7 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 			}
 		});
 		
-		XposedHelpers.findAndHookMethod(ClockWidget, "onFinishInflate", new XC_MethodHook() {
+		findAndHookMethod(ClockWidget, "onFinishInflate", new XC_MethodHook() {
 			@Override
 			protected void afterHookedMethod(MethodHookParam param) {
 				mClockView = (LinearLayout) getObjectField(param.thisObject, "mClockView");
@@ -250,38 +248,6 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		});
 		loadSettings();
 	}
-	
-	/*
-	private void doRemoteControlHooks(LoadPackageParam lpparam) {
-		XC_MethodHook setPlaybackStateHook = new XC_MethodHook() {
-			@Override
-			protected void beforeHookedMethod(MethodHookParam param) {
-				int state = (Integer) param.args[0];
-				updatePlayPauseState(state);
-			}
-		};
-		
-		for (Method method: RemoteControlClient.class.getMethods()) {
-			if (method.getName().equals("setPlaybackState")) {
-				XposedBridge.hookMethod(method, setPlaybackStateHook);
-			}
-		}
-		
-		findAndHookMethod(RemoteControlClient.MetadataEditor.class, "apply", new XC_MethodHook() {
-			@Override
-			protected void beforeHookedMethod(MethodHookParam param) {
-				Bundle mEditorMetadata = (Bundle) getObjectField(param.thisObject, "mEditorMetadata");
-				boolean isArtworkExist = XposedHelpers.getBooleanField(param.thisObject, "mArtworkChanged");
-				if (isArtworkExist) {
-					Bitmap artwork = (Bitmap) getObjectField(param.thisObject, "mEditorArtwork");
-					setAlbumArt(artwork);
-				}
-				
-				updateMetadata(mEditorMetadata);
-			}
-		});
-	}
-	*/
 
 	private void loadSettings() {
 		boolean enableLongPressToToggle = prefs.getBoolean(Common.SETTINGS_LONGPRESS_KEY, false);
@@ -303,8 +269,7 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		if (mKeyguardViewMediator != null)
 			XposedHelpers.callMethod(mKeyguardViewMediator, "userActivity");
 		
-		if (mHandler != null && mGoToSleepRunnable != null) {
-			
+		if (mHandler != null && mGoToSleepRunnable != null) {	
 			try {
 				Method removeCallbacksMethod = mHandler.getClass().getMethod("removeCallbacks", Runnable.class);
 				removeCallbacksMethod.invoke(mHandler, mGoToSleepRunnable);
@@ -376,22 +341,22 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		mTrackIntent = mContext.registerReceiver(mTrackReceiver, new IntentFilter(PowerAMPiAPI.ACTION_TRACK_CHANGED));
 		mStatusIntent = mContext.registerReceiver(mStatusReceiver, new IntentFilter(PowerAMPiAPI.ACTION_STATUS_CHANGED));
 
-	    IntentFilter iF = new IntentFilter();
-	    iF.addAction("com.android.music.metachanged");
-	    iF.addAction("com.htc.music.metachanged");
-	    iF.addAction("fm.last.android.metachanged");
-	    iF.addAction("com.sec.android.app.music.metachanged");
-	    iF.addAction("com.nullsoft.winamp.metachanged");
-	    iF.addAction("com.amazon.mp3.metachanged");     
-	    iF.addAction("com.miui.player.metachanged");        
-	    iF.addAction("com.real.IMP.metachanged");
-	    iF.addAction("com.sonyericsson.music.metachanged");
-	    iF.addAction("com.rdio.android.metachanged");
-	    iF.addAction("com.samsung.sec.android.MusicPlayer.metachanged");
-	    iF.addAction("com.andrew.apollo.metachanged");
-	    iF.addAction("com.android.music.playstatechanged");
-
-	    mContext.registerReceiver(metadataChangedReceiver, iF);
+		IntentFilter iF = new IntentFilter();
+		iF.addAction("com.android.music.metachanged");
+		iF.addAction("com.htc.music.metachanged");
+		iF.addAction("fm.last.android.metachanged");
+		iF.addAction("com.sec.android.app.music.metachanged");
+		iF.addAction("com.nullsoft.winamp.metachanged");
+		iF.addAction("com.amazon.mp3.metachanged");     
+		iF.addAction("com.miui.player.metachanged");        
+		iF.addAction("com.real.IMP.metachanged");
+		iF.addAction("com.sonyericsson.music.metachanged");
+		iF.addAction("com.rdio.android.metachanged");
+		iF.addAction("com.samsung.sec.android.MusicPlayer.metachanged");
+		iF.addAction("com.andrew.apollo.metachanged");
+		iF.addAction("com.android.music.playstatechanged");
+		
+		mContext.registerReceiver(metadataChangedReceiver, iF);
 	}
 	
 	private BroadcastReceiver metadataChangedReceiver = new BroadcastReceiver() {
@@ -644,7 +609,7 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		} else {
 			sendOrderedBroadcastAsUser(intent, mCurrentUserHandle);
 		}
-
+		
 		keyEvent = new KeyEvent(KeyEvent.ACTION_UP, keyCode);
 		intent = new Intent(Intent.ACTION_MEDIA_BUTTON);
 		intent.putExtra(Intent.EXTRA_KEY_EVENT, keyEvent);
@@ -654,52 +619,12 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 			    mClientIntent.send(mContext, 0, intent);
 			} catch (CanceledException e) {
 				XposedBridge.log("Error sending intent for media button up");
-			    e.printStackTrace();
+				e.printStackTrace();
 			}
 		} else {
 			sendOrderedBroadcastAsUser(intent, mCurrentUserHandle);
 		}
-	}
-	
-	public void updatePlayPauseState(int playstate) {
-		XposedBridge.log("updatePlayPauseState" + " " + playstate);
-		boolean playing = false;
-		if (playstate == RemoteControlClient.PLAYSTATE_PLAYING) {
-			playing = true;
-		} else {
-			playing = false;
-		}
-		
-		mIsPlaying = playing;
-		if (playing)
-			setVisibilityOfMusicWidgets(View.VISIBLE);
-		else
-			setVisibilityOfMusicWidgets(View.GONE);
-		
-		updateRemoteFieldsFromLocalFields();
-	}
-
-	protected void updateMetadata(Bundle data) {
-		String artist = getMdString(data, MediaMetadataRetriever.METADATA_KEY_ALBUMARTIST);
-		
-		if (artist == null)
-			artist = "";
-		
-		String title = getMdString(data, MediaMetadataRetriever.METADATA_KEY_TITLE);
-		if (title == null) {
-			title = "";
-		}
-		
-		XposedBridge.log("updateMetadata" + " " + title + " " + artist);
-		
-		setTrackMetadata(title, artist);
-		updateRemoteFieldsFromLocalFields();
-	}
-
-	private String getMdString(Bundle data, int id) {
-		return data.getString(Integer.toString(id));
-	}
-	
+	}	
 	
 	// Helpers methods
 	private ComponentName startServiceAsUser(Intent intent, UserHandle user) {
@@ -742,23 +667,22 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 
 	// Get album art from a content provider
 	public Bitmap getAlbumart(Context context, Long album_id, String contentProviderUri) {
-        Bitmap bm = null;
-        if (album_id == -1)
-        	return bm;
+		Bitmap bm = null;
+		if (album_id == -1)
+			return bm;
         
-        try 
-        {
-            final Uri sArtworkUri = Uri.parse(contentProviderUri);
-            Uri uri = ContentUris.withAppendedId(sArtworkUri, album_id);
-            ParcelFileDescriptor pfd = context.getContentResolver().openFileDescriptor(uri, "r");
+		try {
+			final Uri sArtworkUri = Uri.parse(contentProviderUri);
+			Uri uri = ContentUris.withAppendedId(sArtworkUri, album_id);
+			ParcelFileDescriptor pfd = context.getContentResolver().openFileDescriptor(uri, "r");
 
-            if (pfd != null) {
-                FileDescriptor fd = pfd.getFileDescriptor();
-                bm = BitmapFactory.decodeFileDescriptor(fd);
-            }
-        } catch (Exception e) {
-        	e.printStackTrace();
-        }
-        return bm;
+			if (pfd != null) {
+				FileDescriptor fd = pfd.getFileDescriptor();
+				bm = BitmapFactory.decodeFileDescriptor(fd);
+			}
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+		return bm;
 	}
- }
+}
