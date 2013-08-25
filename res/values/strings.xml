@@ -1,6 +1,6 @@
 <resources>
 
-    <string name="app_name">S View Poweramp Metadata</string>
+    <string name="app_name">S-View Media Player Metadata</string>
 
     <string name="pref_title_media_player">Media Player to use</string>
 
@@ -9,5 +9,10 @@
     <string name="pref_description_longpress">Long press S-View screen to toggle playback</string>
 
     <string name="pref_description_media_player">Select media player to control when skipping tracks</string>
+
+    <string name="disable_samsung_updates_title">Disable stock metadata updates</string>
+
+    <string name="disable_samsung_updates_description">Disable metadata updates by the stock Samsung music player, this can solve problems like hidden metadata</string>
+    <string name="pref_header_general">General</string>
 
 </resources>
