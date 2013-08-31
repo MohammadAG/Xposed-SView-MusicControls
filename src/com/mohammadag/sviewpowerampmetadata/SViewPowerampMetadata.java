@@ -1,10 +1,9 @@
 package com.mohammadag.sviewpowerampmetadata;
 
+import static de.robv.android.xposed.XposedBridge.hookAllConstructors;
 import static de.robv.android.xposed.XposedHelpers.findAndHookMethod;
 import static de.robv.android.xposed.XposedHelpers.getObjectField;
 import static de.robv.android.xposed.XposedHelpers.getStaticObjectField;
-
-import static de.robv.android.xposed.XposedBridge.hookAllConstructors;
 
 import java.io.FileDescriptor;
 import java.lang.reflect.Method;
@@ -30,7 +29,6 @@ import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.MotionEvent.PointerCoords;
 import android.view.View;
-import android.view.View.OnLongClickListener;
 import android.view.View.OnTouchListener;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -47,11 +45,14 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 
 public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHookZygoteInit {
-	private OnLongClickListener mLongClickListener = null;
-	
-	// Needed for swipe gestures
-	private PointerCoords mDownPos = new PointerCoords();
+	// Needed for gestures
+	private static PointerCoords mDownPos = new PointerCoords();
 	private static PointerCoords mUpPos = new PointerCoords();
+	private long mDownTime = 0;
+	private int mDefaultTextColor = 0;
+	private Runnable mColorChangingRunnable = null;
+	private boolean mEnableLongPressToToggle = false;
+	private int mLongPressTimeout = Common.DEFAULT_LONG_PRESS_TIME_MS;
 	
 	// Pointers to fields from S-View classes
 	private Context mContext = null;
@@ -91,9 +92,15 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 	
 	// Resources stuff
 	private static String MODULE_PATH = null;
-	
-	private static XSharedPreferences prefs;
 	private XModuleResources modRes = null;
+	
+	// Preferences
+	private static XSharedPreferences prefs;
+	private String mCurrentMediaPlayer = null;
+	
+	// One time or internal use
+	private boolean mShouldShowLongPressInstructions = false;
+	private boolean mBlockOtherTextChanges = false;
 	
 	private enum MusicServiceCommands {
 		PLAY_PAUSE,
@@ -115,20 +122,54 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		
 		modRes = XModuleResources.createInstance(MODULE_PATH, null);
 		
+		// We need this to use send*AsUser
 		mCurrentUserHandle = (UserHandle) getStaticObjectField(UserHandle.class, "CURRENT");
 		
+		// TODO: Move this somewhere else
 		final OnTouchListener gestureListener = new OnTouchListener() {
 			@Override
 			public boolean onTouch(View v, MotionEvent event) {
+				final View touchedView = v;
 				 switch(event.getAction()) {
 				 	case MotionEvent.ACTION_DOWN: {
 				 		event.getPointerCoords(0, mDownPos);
+				 		if (mEnableLongPressToToggle) {
+					 		mDownTime = System.currentTimeMillis();
+					 		mColorChangingRunnable = new Runnable() {
+								@Override
+								public void run() {
+									showInstructionsForLongPressIfNeeded();
+									setColorForView(touchedView, mContext.getResources().getColor(android.R.color.holo_blue_light));
+								}
+					 		};
+							if (mHandler != null)
+								mHandler.postDelayed(mColorChangingRunnable, mLongPressTimeout);
+				 		}
 				 		return true;
+				 	}
+				 	
+				 	case MotionEvent.ACTION_MOVE: {
+				 		if (mEnableLongPressToToggle) {
+					 		boolean isLongClick = ((System.currentTimeMillis() - mDownTime) > mLongPressTimeout);
+					 		if (isLongClick) {
+					 			mHandler.post(mColorChangingRunnable);
+					 		}
+				 		}
+				 		return false;
 				 	}
 	            
 				 	case MotionEvent.ACTION_UP: {
+				 		if (mEnableLongPressToToggle && mHandler != null && mColorChangingRunnable != null)
+				 			mHandler.removeCallbacks(mColorChangingRunnable);
+
 				 		event.getPointerCoords(0, mUpPos);
-	 
+				 		boolean isLongClick = false;
+
+				 		if (mEnableLongPressToToggle) {
+				 			isLongClick = ((System.currentTimeMillis() - mDownTime) > mLongPressTimeout);
+				 			setColorForView(v, mDefaultTextColor);
+				 		}
+
 						float dx = mDownPos.x - mUpPos.x;
 						if (Math.abs(dx) > Common.MIN_DISTANCE) {
 						    if (dx > 0)
@@ -138,9 +179,8 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 						    return true;
 						}
 						
+						// We might use this later on to change playlists in PowerAMP
 						float dy = mDownPos.y - mUpPos.y;
-						
-						// Check for vertical wipe
 						if (Math.abs(dy) > Common.MIN_DISTANCE) {
 							if (dy > 0)
 								onSwipeUp();
@@ -148,6 +188,13 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 								onSwipeDown();
 							return true;
 						}
+
+						if (isLongClick && mEnableLongPressToToggle) {
+							extendTimeout();
+							togglePlayback();
+						}
+
+						return true;
 				 	}
 				 }
 				 return false;
@@ -173,6 +220,10 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		final Class<?> keyguardViewMediator = XposedHelpers.findClass("com.android.internal.policy.impl.keyguard.KeyguardViewMediator",
 				lpparam.classLoader);
 		
+		// We need an instance of KeyguardViewMediator to extend the S-View
+		// timeout when the device is locked. When the device is unlocked, the
+		// timeout is handled internally by SViewCoverManager, default timeout is
+		// 8000 milliseconds.
 		hookAllConstructors(keyguardViewMediator, new XC_MethodHook() {
 			@Override
 			protected void afterHookedMethod(MethodHookParam param) {
@@ -199,15 +250,10 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		Class<?> ClockWidget = XposedHelpers.findClass("com.android.internal.policy.impl.sviewcover.SViewCoverWidget$Clock",
 				lpparam.classLoader);
 		
-		mLongClickListener = new OnLongClickListener() {
-			@Override
-			public boolean onLongClick(View v) {
-				extendTimeout();
-				togglePlayback();
-				return true;
-			}
-		};
+		loadSettings();
 		
+		// The view is inflated each time it shows. We need to restore state each
+		// time that happens.
 		findAndHookMethod(MusicWidget, "onFinishInflate", new XC_MethodHook() {
 			@Override
 			protected void afterHookedMethod(MethodHookParam param) {
@@ -218,53 +264,93 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 				
 				updateRemoteFieldsFromLocalFields();
 				
-				setTrackTitleText(getTextToSet(mTrackTitleString, mArtistNameString));
-				if (mAlbumArt != null) {
-					mAlbumArtWithImage.setImageBitmap(mAlbumArt);
-				}
-				
-				if (mIsPlaying) {
-					setVisibilityOfMusicWidgets(View.VISIBLE);
-				} else {
-					setVisibilityOfMusicWidgets(View.GONE);
-				}
+				restoreTextAfterTickerOrInflate();
 			}
 		});
 		
+		// Do the same with the clock view.
 		findAndHookMethod(ClockWidget, "onFinishInflate", new XC_MethodHook() {
 			@Override
 			protected void afterHookedMethod(MethodHookParam param) {
 				mClockView = (LinearLayout) getObjectField(param.thisObject, "mClockView");
+				
+				// In case the user changed the colours* of the S-View screen somehow,
+				// load the colour currently used so we can HOLO it when it's long pressed.
+				TextView view = (TextView) getObjectField(mClockView, "mTime");
+				mDefaultTextColor = view.getCurrentTextColor();
+				
 				mClockView.setOnTouchListener(gestureListener);
 			}
 		});
 		
+		// This hook disables stock updates to the S-View screen, unless the user is using 
+		// the stock player as his current player
 		findAndHookMethod(MusicWidget, "handleMediaUpdate", int.class, int.class, Uri.class, new XC_MethodHook() {
 			@Override
 			protected void beforeHookedMethod(MethodHookParam param) {
-				if (prefs.getBoolean(Common.SETTINGS_DISABLE_SAMSUNG_METADATA_UPDATES, false))
+				if (prefs.getBoolean(Common.SETTINGS_DISABLE_SAMSUNG_METADATA_UPDATES, false) && !mCurrentMediaPlayer.equals(Common.SAMSUNG_MEDIAPLAYER))
 					param.setResult(false);
 			}
 		});
-		loadSettings();
+	}
+	
+	// One time instructions, not used at the moment.
+	private void showInstructionsForLongPressIfNeeded() {
+		if (!mShouldShowLongPressInstructions) 
+			return;
+		
+		mShouldShowLongPressInstructions = false;
+		
+		showTickerText("Release your finger when a view is blue to toggle playback");
+	}
+	
+	Runnable restoreTextRunnable = new Runnable() {
+		@Override
+		public void run() {
+			restoreTextAfterTickerOrInflate();
+			mBlockOtherTextChanges = false;
+		}
+	};
+	
+	private void showTickerText(String text) {
+		setTrackTitleText(text);
+		scrollText();
+		mBlockOtherTextChanges = true;
+		mHandler.postDelayed(restoreTextRunnable, 10000);
+	}
+
+	// Sets the colour for the currently pressed view
+	protected void setColorForView(View v, int color) {
+		if (color == 0)
+			color = mContext.getResources().getColor(android.R.color.white);
+		
+		if (v.getClass().getName() == TextView.class.getName()) {
+			((TextView)v).setTextColor(color);
+		} else if (v.getClass().getName() == mClockView.getClass().getName()) {
+			for (String viewName : Common.CLOCK_VIEW_SUBVIEW_NAMES) {
+				TextView view = (TextView) getObjectField(v, viewName);
+				view.setTextColor(color);
+			}
+		}
 	}
 
 	private void loadSettings() {
-		boolean enableLongPressToToggle = prefs.getBoolean(Common.SETTINGS_LONGPRESS_KEY, false);
+		mEnableLongPressToToggle = prefs.getBoolean(Common.SETTINGS_LONGPRESS_KEY, false);
+		mLongPressTimeout = Integer.parseInt(prefs.getString(Common.SETTINGS_LONGPRESS_TIMEOUT_KEY,
+				String.valueOf(Common.DEFAULT_LONG_PRESS_TIME_MS)));
 		
-		if (enableLongPressToToggle) {
-			if (mTrackTitle != null)
-				mTrackTitle.setOnLongClickListener(mLongClickListener);
-			if (mClockView != null)
-				mClockView.setOnLongClickListener(mLongClickListener);
-		}
+		mCurrentMediaPlayer = prefs.getString(Common.SETTINGS_MEDIAPLAYER_KEY, Common.POWERAMP_MEDIAPLAYER);
 		
-		if (mTrackTitle != null)
-			mTrackTitle.setHapticFeedbackEnabled(enableLongPressToToggle);
-		if (mClockView != null)
-			mClockView.setHapticFeedbackEnabled(enableLongPressToToggle);
+		//mShouldShowLongPressInstructions = !prefs.getBoolean(Common.SETTINGS_DID_WE_SHOW_LONG_PRESS_INSTRUCTIONS, false);
 	}
 
+	// Extend the screen-off timeout whenever the user does useful interactions
+	// with the S-View screen, if the touches are useless (for example, in a user's
+	// pocket), we simply ignore them.
+	
+	// This is done in two ways, once by calling a method in Android itself, this is
+	// needed when the screen is locked, and another time in S-View's internal classes
+	// to reset the stock 8000ms timeout.
 	protected void extendTimeout() {
 		if (mKeyguardViewMediator != null)
 			XposedHelpers.callMethod(mKeyguardViewMediator, "userActivity");
@@ -300,10 +386,34 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		return localTitle + " - " + localArtist;
 	}
 	
+	// In the future we might add a "ticker" like thingy that shows text only once
+	// then restore the metadata
+	private void restoreTextAfterTickerOrInflate() {
+		if (mCurrentMediaPlayer.equals(Common.SAMSUNG_MEDIAPLAYER))
+			return;
+		
+		setTrackTitleText(getTextToSet(mTrackTitleString, mArtistNameString));
+		if (mAlbumArt != null) {
+			mAlbumArtWithImage.setImageBitmap(mAlbumArt);
+		}
+		
+		if (mIsPlaying) {
+			setVisibilityOfMusicWidgets(View.VISIBLE);
+		} else {
+			setVisibilityOfMusicWidgets(View.GONE);
+		}
+	}
+	
+	// Sets the TextView's text, this is a helper method that shows
+	// the TextView when there's actual text.
+	// This text has to be restored somehow as the S-View class forgets
+	// its current values when it's reinflated.
 	private void setTrackTitleText(String text) {
+		if (mBlockOtherTextChanges)
+			return;
+		
 		if (mTrackTitle != null) {
 			mTrackTitle.setText(text);
-			mTrackTitle.setSelected(true);
 			if (!text.isEmpty()) {
 				setVisibilityOfMusicWidgets(View.VISIBLE);
 			} else {
@@ -312,6 +422,8 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		}
 	}
 	
+	// Sets the album art onto the S-View ImageView, and stores the bitmap
+	// internally so it's restored when the View is reinflated.
 	private void setAlbumArt(Bitmap bitmap) {
 		mAlbumArt = bitmap;
 		
@@ -319,7 +431,12 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 			mAlbumArtWithImage.setImageBitmap(bitmap);
 	}
 	
+	// Sets the internal fields in the S-View classes to the values we have
+	// in our current class.
 	private void updateRemoteFieldsFromLocalFields() {
+		if (mCurrentMediaPlayer.equals(Common.SAMSUNG_MEDIAPLAYER))
+			return;
+		
 		setTrackTitleText(getTextToSet(mTrackTitleString, mArtistNameString));
 		setAlbumArt(mAlbumArt);
 		
@@ -331,6 +448,7 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		}
 	}
 	
+	// Register some BroadcastReceivers that will get metadata and updated settings.
 	private void registerAndLoadStatus() {
 		if (mContext == null)
 			return;
@@ -359,14 +477,17 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		mContext.registerReceiver(metadataChangedReceiver, iF);
 	}
 	
+	// Although Poweramp uses one of the intents registered to this receiver,
+	// we simply ignore anything sent by it so as not to confuse the user.
 	private BroadcastReceiver metadataChangedReceiver = new BroadcastReceiver() {
 		@Override
 		public void onReceive(Context context, Intent intent) {
 			if (intent == null)
 				return;
 			
-			String currentMediaPlayer = prefs.getString(Common.SETTINGS_MEDIAPLAYER_KEY, Common.POWERAMP_MEDIAPLAYER);
-			if (currentMediaPlayer.equals(Common.POWERAMP_MEDIAPLAYER) || intent.hasExtra("com.maxmpz.audioplayer.source"))
+			if (mCurrentMediaPlayer.equals(Common.POWERAMP_MEDIAPLAYER)
+					|| intent.hasExtra("com.maxmpz.audioplayer.source")
+					|| mCurrentMediaPlayer.equals(Common.SAMSUNG_MEDIAPLAYER))
 				return;
 			
 			if (intent.getAction().equals("com.android.music.playstatechanged")) {
@@ -382,6 +503,7 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 					artist = intent.getStringExtra("artist");
 				
 				setTrackMetadata(title, artist);
+				// Attempt to load album art from either Google Play Music or MediaStore.
 				Bitmap bitmap = getAlbumart(context, intent.getLongExtra("albumId", -1), Common.GOOGLE_PLAY_CONTENT_PROVIDER_URI);
 				if (bitmap == null)
 					bitmap = getAlbumart(context, intent.getLongExtra("albumId", -1), Common.MEDIA_STORE_CONTENT_PROVIDER_URI);
@@ -396,6 +518,7 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		}
 	};
 	
+	// Reloads settings, the Intent is sent by SettingsActivity.
 	private BroadcastReceiver mSettingsUpdatedReceiver = new BroadcastReceiver() {		
 		@Override
 		public void onReceive(Context context, Intent intent) {
@@ -406,7 +529,7 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		}
 	};
 	
-	// Poweramp broadcast receivers
+	// PowerAMP broadcast receivers, code adapted from PowerAMP API samples.
 	private BroadcastReceiver mTrackReceiver = new BroadcastReceiver() {
 		@Override
 		public void onReceive(Context context, Intent intent) {
@@ -414,8 +537,7 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 			mCurrentTrack = null;
 			if (mTrackIntent != null) {
 				mCurrentTrack = mTrackIntent.getBundleExtra(PowerAMPiAPI.TRACK);
-				String currentMediaPlayer = prefs.getString(Common.SETTINGS_MEDIAPLAYER_KEY, Common.POWERAMP_MEDIAPLAYER);
-				if (!currentMediaPlayer.equals(Common.POWERAMP_MEDIAPLAYER))
+				if (!mCurrentMediaPlayer.equals(Common.POWERAMP_MEDIAPLAYER))
 					return;
 				
 				String title, artist;
@@ -434,8 +556,7 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		@Override
 		public void onReceive(Context context, Intent intent) {
 			mAAIntent = intent;
-			String currentMediaPlayer = prefs.getString(Common.SETTINGS_MEDIAPLAYER_KEY, Common.POWERAMP_MEDIAPLAYER);
-			if (!currentMediaPlayer.equals(Common.POWERAMP_MEDIAPLAYER))
+			if (!mCurrentMediaPlayer.equals(Common.POWERAMP_MEDIAPLAYER))
 				return;
 			
 			String directAAPath = mAAIntent.getStringExtra(PowerAMPiAPI.ALBUM_ART_PATH);
@@ -450,7 +571,7 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 					mAlbumArtWithImage.setImageURI(Uri.parse(directAAPath));
 				}
 			} else {
-				setAlbumArt(null);
+				setAlbumArt(BitmapFactory.decodeResource(modRes, R.drawable.appce_ic_music));
 			}
 			 
 			 updateRemoteFieldsFromLocalFields();
@@ -461,8 +582,7 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		@Override
 		public void onReceive(Context context, Intent intent) {
 			mStatusIntent = intent;
-			String currentMediaPlayer = prefs.getString(Common.SETTINGS_MEDIAPLAYER_KEY, Common.POWERAMP_MEDIAPLAYER);
-			if (!currentMediaPlayer.equals(Common.POWERAMP_MEDIAPLAYER))
+			if (!mCurrentMediaPlayer.equals(Common.POWERAMP_MEDIAPLAYER))
 				return;
 			
 			if (mStatusIntent != null) {
@@ -479,8 +599,6 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 					case PowerAMPiAPI.Status.PLAYING_ENDED:
 						break;
 				}
-				if (mMusicWidgetObject != null)
-					XposedHelpers.setBooleanField(mMusicWidgetObject, "mIsPlaying", !paused);
 				
 				if (paused) {
 					setVisibilityOfMusicWidgets(View.GONE);
@@ -496,16 +614,35 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		}
 	};
 	
+	// We use this to scroll the text, aka marquee effect.
+	Runnable scrollTextRunnable = new Runnable() {
+		@Override
+		public void run() {
+			if (mTrackTitle != null)
+				mTrackTitle.setSelected(true);
+		}
+	};
+	
+	private void scrollText() {
+		if (mHandler != null)
+			mHandler.postDelayed(scrollTextRunnable, 20);
+		else
+			mTrackTitle.setSelected(true);
+	}
+	
+	// Go over the two widgets and set their visibility, helper method.
 	private void setVisibilityOfMusicWidgets(int visibility) {
 		if (mTrackTitle != null) {
 			mTrackTitle.setVisibility(visibility);
-			mTrackTitle.setSelected(true);
+			scrollText();
 		}
 		
 		if (mAlbumArtWithImage != null)
 			mAlbumArtWithImage.setVisibility(visibility);
 	}
 
+	// Sets and saves metadata used to populate view and restore it when
+	// it reinflates.
 	private void setTrackMetadata(String title, String artist) {
 		mTrackTitleString = title;
 		mArtistNameString = artist;
@@ -514,64 +651,65 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		updateRemoteFieldsFromLocalFields();
 	}
 	
+	// Helper method to advance playing track.
 	private void nextTrack() {
 		if (mContext == null)
 			return;
 		
-		String currentMediaPlayer = prefs.getString(Common.SETTINGS_MEDIAPLAYER_KEY, Common.POWERAMP_MEDIAPLAYER);
-		
-		if (currentMediaPlayer.equals(Common.POWERAMP_MEDIAPLAYER)) {
+		if (mCurrentMediaPlayer.equals(Common.POWERAMP_MEDIAPLAYER)) {
 			Intent powerampActionIntent = new Intent(PowerAMPiAPI.ACTION_API_COMMAND);
 			powerampActionIntent.putExtra(PowerAMPiAPI.COMMAND, PowerAMPiAPI.Commands.NEXT);
 			startServiceAsUser(powerampActionIntent, mCurrentUserHandle);
-		} else if (currentMediaPlayer.equals(Common.GOOGLEPLAY_MEDIAPLAYER)) {
+		} else if (mCurrentMediaPlayer.equals(Common.GOOGLEPLAY_MEDIAPLAYER)) {
 			sendMusicServiceCommand(MusicServiceCommands.NEXT);
-		} else if (currentMediaPlayer.equals(Common.EMULATE_MEDIA_KEYS_MEDIAPLAYER)) {
+		} else if (mCurrentMediaPlayer.equals(Common.EMULATE_MEDIA_KEYS_MEDIAPLAYER)) {
 			sendMediaButton(KeyEvent.KEYCODE_MEDIA_NEXT);
+		} else if (mCurrentMediaPlayer.equals(Common.SAMSUNG_MEDIAPLAYER)) {
+			sendMusicServiceCommand(Common.SAMSUNG_MEDIAPLAYER, MusicServiceCommands.NEXT);
 		}
 	}
 	
 	private void previousTrack() {
 		if (mContext == null)
 			return;
-
-		String currentMediaPlayer = prefs.getString(Common.SETTINGS_MEDIAPLAYER_KEY, Common.POWERAMP_MEDIAPLAYER);
 		
-		if (currentMediaPlayer.equals(Common.POWERAMP_MEDIAPLAYER)) {
+		if (mCurrentMediaPlayer.equals(Common.POWERAMP_MEDIAPLAYER)) {
 			Intent powerampActionIntent = new Intent(PowerAMPiAPI.ACTION_API_COMMAND);
 			powerampActionIntent.putExtra(PowerAMPiAPI.COMMAND, PowerAMPiAPI.Commands.PREVIOUS);
 			startServiceAsUser(powerampActionIntent, mCurrentUserHandle);
-		} else if (currentMediaPlayer.equals(Common.GOOGLEPLAY_MEDIAPLAYER)) {
+		} else if (mCurrentMediaPlayer.equals(Common.GOOGLEPLAY_MEDIAPLAYER)) {
 			sendMusicServiceCommand(MusicServiceCommands.PREVIOUS);
-		} else if (currentMediaPlayer.equals(Common.EMULATE_MEDIA_KEYS_MEDIAPLAYER)) {
+		} else if (mCurrentMediaPlayer.equals(Common.EMULATE_MEDIA_KEYS_MEDIAPLAYER)) {
 			sendMediaButton(KeyEvent.KEYCODE_MEDIA_PREVIOUS);
+		} else if (mCurrentMediaPlayer.equals(Common.SAMSUNG_MEDIAPLAYER)) {
+			sendMusicServiceCommand(Common.SAMSUNG_MEDIAPLAYER, MusicServiceCommands.PREVIOUS);
 		}
 	}
 	
 	private void togglePlayback() {
-		if (mContext == null)
+		if (mContext == null || !mEnableLongPressToToggle)
 			return;
 		
-		if (!prefs.getBoolean(Common.SETTINGS_LONGPRESS_KEY, false))
-			return;
-		
-		String currentMediaPlayer = prefs.getString(Common.SETTINGS_MEDIAPLAYER_KEY, Common.POWERAMP_MEDIAPLAYER);
-		
-		if (currentMediaPlayer.equals(Common.POWERAMP_MEDIAPLAYER)) {
+		if (mCurrentMediaPlayer.equals(Common.POWERAMP_MEDIAPLAYER)) {
 			Intent powerampActionIntent = new Intent(PowerAMPiAPI.ACTION_API_COMMAND);
 			powerampActionIntent.putExtra(PowerAMPiAPI.COMMAND, PowerAMPiAPI.Commands.TOGGLE_PLAY_PAUSE);
 			startServiceAsUser(powerampActionIntent, mCurrentUserHandle);
-		} else if (currentMediaPlayer.equals(Common.GOOGLEPLAY_MEDIAPLAYER)) {
+		} else if (mCurrentMediaPlayer.equals(Common.GOOGLEPLAY_MEDIAPLAYER)) {
 			sendMusicServiceCommand(MusicServiceCommands.PLAY_PAUSE);
-		} else if (currentMediaPlayer.equals(Common.EMULATE_MEDIA_KEYS_MEDIAPLAYER)) {
+		} else if (mCurrentMediaPlayer.equals(Common.EMULATE_MEDIA_KEYS_MEDIAPLAYER)) {
 			sendMediaButton(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE);
+		} else if (mCurrentMediaPlayer.equals(Common.SAMSUNG_MEDIAPLAYER)) {
+			sendMusicServiceCommand(Common.SAMSUNG_MEDIAPLAYER, MusicServiceCommands.PLAY_PAUSE);
 		}
 	}
 	
+	// TODO: Deprecate this.
+	// Helper method to send metadata for Google Play Music.
 	private void sendMusicServiceCommand(MusicServiceCommands command) {
-		sendMusicServiceCommand("com.android.music", command);
+		sendMusicServiceCommand(Common.GOOGLEPLAY_MEDIAPLAYER, command);
 	}
 	
+	// Send musicservicecommand for a specific package name.
 	private void sendMusicServiceCommand(String packageName, MusicServiceCommands command) {
 		Intent musicIntent = new Intent();
 		String action = packageName + ".musicservicecommand";
@@ -590,10 +728,18 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 			break;
 		}
 		
+		// Typical Samsung not adhering to standards.
+		if (packageName.equals(Common.SAMSUNG_MEDIAPLAYER)) {
+			if (musicIntent.hasExtra("command")) {
+				action += "." + musicIntent.getStringExtra("command");
+			}
+		}		
+		
 		musicIntent.setAction(action);
 		sendBroadcastAsUser(musicIntent, mCurrentUserHandle);
 	}
 	
+	// Send generic simulated media button press.
 	private void sendMediaButton(int keyCode) {
 		KeyEvent keyEvent = new KeyEvent(KeyEvent.ACTION_DOWN, keyCode);
 		Intent intent = new Intent(Intent.ACTION_MEDIA_BUTTON);
@@ -626,7 +772,7 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		}
 	}	
 	
-	// Helpers methods
+	// Helpers methods to use Android private API.
 	private ComponentName startServiceAsUser(Intent intent, UserHandle user) {
 		if (mContext == null)
 			return null;
@@ -686,3 +832,4 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		return bm;
 	}
 }
+

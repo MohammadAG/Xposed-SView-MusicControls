@@ -1,12 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.mohammadag.sviewpowerampmetadata"
-    android:versionCode="3"
-    android:versionName="2.0" >
-
+    android:versionCode="5"
+    android:versionName="2.2" >
+    
     <uses-sdk
         android:minSdkVersion="17"
-        android:targetSdkVersion="17" />
+        android:targetSdkVersion="17"
+        android:maxSdkVersion="17"/>
+    
+    <compatible-screens>
+	    <screen
+	    	android:screenDensity="480"
+	    	android:screenSize="normal" /> 
+   	</compatible-screens>
 
     <application
         android:allowBackup="true"
@@ -21,7 +28,7 @@
             android:value="2.0*" />
         <meta-data
             android:name="xposeddescription"
-            android:value="Adds PowerAMP or Play Music metadata to S View screen" />
+            android:value="Music Controls and Metadata on the S-View screen" />
 
         <activity
             android:name="com.mohammadag.sviewpowerampmetadata.SettingsActivity"

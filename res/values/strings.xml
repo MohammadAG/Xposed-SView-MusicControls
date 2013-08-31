@@ -1,9 +1,13 @@
 <resources>
-    <string name="app_name">S-View Media Player Metadata</string>
+    <string name="app_name">S-View Music Controls</string>
     <string name="pref_title_media_player">Media Player to use</string>
     <string name="pref_title_longpress_title">Long press to pause/play</string>
 	<string name="pref_description_longpress">Long press S-View screen to toggle playback</string>
     <string name="pref_description_media_player">Select media player to control when skipping tracks</string>
     <string name="disable_samsung_updates_title">Disable stock metadata updates</string>
-    <string name="disable_samsung_updates_diption">Disable metadata updates by the stock Samsung music player, this can solve problems like hidden metadata</string>
+    <string name="disable_samsung_updates_description">Disable metadata updates by the stock Samsung music player, this can solve problems like hidden metadata</string>
+    <string name="dialog_longpress_title">Long press timeout</string>
+    <string name="dialog_longpress_message">Type in the amount of time you want to long press the screen to toggle playback (in milliseconds, 1s = 1000ms)</string>
+    <string name="action_save">Save</string>
+    <string name="action_cancel">Cancel</string>
 </resources>

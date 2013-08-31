@@ -7,6 +7,7 @@
         android:negativeButtonText="@null"
         android:positiveButtonText="@null"
         android:title="@string/pref_title_media_player" android:summary="@string/pref_description_media_player"/>
-    <CheckBoxPreference android:summary="@string/pref_description_longpress" android:title="@string/pref_title_longpress_title" android:key="longpress_to_toggle_playback" android:defaultValue="false"/>
+    <CheckBoxPreference android:summary="@string/pref_description_longpress" android:title="@string/pref_title_longpress_title" android:key="longpress_to_toggle_playback" android:defaultValue="false" android:shouldDisableView="false"/>
     <CheckBoxPreference android:summary="@string/disable_samsung_updates_description" android:key="disable_samsung_music_updates" android:title="@string/disable_samsung_updates_title"/>
+    <EditTextPreference android:key="longpress_timeout" android:title="@string/dialog_longpress_title" android:defaultValue="500" android:dialogMessage="@string/dialog_longpress_message" android:positiveButtonText="@string/action_save" android:dialogTitle="@string/dialog_longpress_title" android:negativeButtonText="@string/action_cancel" android:inputType="number"/>
 </PreferenceScreen>

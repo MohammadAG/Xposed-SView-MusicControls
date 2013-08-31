@@ -1,26 +1,16 @@
 <resources>
-
     <string name="title_activity_settings">S-View Media Player Settings</string>
-
-    <!-- Strings related to Settings -->
-
-
-    <!-- Example General settings -->
     <string name="pref_header_general">General</string>
-
     <string-array name="pref_mediaplayer_list_titles">
+        <item>Stock Samsung Player</item>
         <item>Poweramp</item>
+        <item>Google Play Music</item>
         <item>Emulate media buttons</item>
-        <item >Google Play Music</item>
     </string-array>
     <string-array name="pref_mediaplayer_list_values">
+        <item>com.sec.android.app.music</item>
         <item>com.maxmpz.audioplayer</item>
+        <item>com.android.music</item>
         <item>emulate_media_buttons</item>
-        <item >com.android.music</item>
     </string-array>
-
-    <!-- Example settings for Data & Sync -->
-
-    <!-- Example settings for Notifications -->
-
 </resources>
