@@ -19,6 +19,7 @@ public class Common {
 	public static final String SETTINGS_MEDIAPLAYER_KEY = "current_media_player";
 	public static final String SETTINGS_DISABLE_SAMSUNG_METADATA_UPDATES = "disable_samsung_music_updates";
 	public static final String SETTINGS_LONGPRESS_TIMEOUT_KEY = "longpress_timeout";
+	public static final String SETTINGS_SWIPE_ONLY_WHEN_PLAYING_KEY = "swipe_only_while_playing";
 	public static final String SETTINGS_DID_WE_SHOW_LONG_PRESS_INSTRUCTIONS = "did_we_show_instructions";
 	
 	// Content providers to query

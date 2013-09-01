@@ -51,8 +51,6 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 	private long mDownTime = 0;
 	private int mDefaultTextColor = 0;
 	private Runnable mColorChangingRunnable = null;
-	private boolean mEnableLongPressToToggle = false;
-	private int mLongPressTimeout = Common.DEFAULT_LONG_PRESS_TIME_MS;
 	
 	// Pointers to fields from S-View classes
 	private Context mContext = null;
@@ -97,6 +95,9 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 	// Preferences
 	private static XSharedPreferences prefs;
 	private String mCurrentMediaPlayer = null;
+	private boolean mEnableLongPressToToggle = false;
+	private boolean mSwipeTracksOnlyWhilePlaying = false;
+	private int mLongPressTimeout = Common.DEFAULT_LONG_PRESS_TIME_MS;
 	
 	// One time or internal use
 	private boolean mShouldShowLongPressInstructions = false;
@@ -201,11 +202,17 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 			}
 
 			private void onSwipeRight() {
+				if (mSwipeTracksOnlyWhilePlaying && !mIsPlaying)
+					return;
+				
 				previousTrack();
 				extendTimeout();
 			}
 			
 			private void onSwipeLeft() {
+				if (mSwipeTracksOnlyWhilePlaying && !mIsPlaying)
+					return;
+				
 				nextTrack();
 				extendTimeout();
 			}
@@ -340,6 +347,7 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 				String.valueOf(Common.DEFAULT_LONG_PRESS_TIME_MS)));
 		
 		mCurrentMediaPlayer = prefs.getString(Common.SETTINGS_MEDIAPLAYER_KEY, Common.POWERAMP_MEDIAPLAYER);
+		mSwipeTracksOnlyWhilePlaying = prefs.getBoolean(Common.SETTINGS_SWIPE_ONLY_WHEN_PLAYING_KEY, false);
 		
 		//mShouldShowLongPressInstructions = !prefs.getBoolean(Common.SETTINGS_DID_WE_SHOW_LONG_PRESS_INSTRUCTIONS, false);
 	}
