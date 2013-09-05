@@ -5,12 +5,14 @@
         <item>Stock Samsung Player</item>
         <item>Poweramp</item>
         <item>Google Play Music</item>
-        <item>Emulate media buttons</item>
+        <item>Spotify</item><item>Emulate media buttons</item>
+        
     </string-array>
     <string-array name="pref_mediaplayer_list_values">
         <item>com.sec.android.app.music</item>
         <item>com.maxmpz.audioplayer</item>
         <item>com.android.music</item>
-        <item>emulate_media_buttons</item>
+        <item>com.spotify.mobile.android.ui</item><item>emulate_media_buttons</item>
+        
     </string-array>
 </resources>

@@ -24,6 +24,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.ParcelFileDescriptor;
 import android.os.UserHandle;
+import android.speech.tts.TextToSpeech;
 import android.text.TextUtils;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
@@ -39,9 +40,11 @@ import com.maxmpz.audioplayer.player.PowerAMPiAPI;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.IXposedHookZygoteInit;
 import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XC_MethodReplacement;
 import de.robv.android.xposed.XSharedPreferences;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
+import de.robv.android.xposed.XposedHelpers.ClassNotFoundError;
 import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 
 public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHookZygoteInit {
@@ -83,7 +86,7 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 	public Handler myHandler = null;
 	
 	// Avoid system warnings
-	private UserHandle mCurrentUserHandle = null;
+	private UserHandle mCurrentUserHandle = (UserHandle) getStaticObjectField(UserHandle.class, "CURRENT");
 	
 	// Lockscreen specific fields
 	private PendingIntent mClientIntent;
@@ -97,11 +100,17 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 	private String mCurrentMediaPlayer = null;
 	private boolean mEnableLongPressToToggle = false;
 	private boolean mSwipeTracksOnlyWhilePlaying = false;
+	private boolean mUserDebugMode = false;
 	private int mLongPressTimeout = Common.DEFAULT_LONG_PRESS_TIME_MS;
 	
 	// One time or internal use
 	private boolean mShouldShowLongPressInstructions = false;
 	private boolean mBlockOtherTextChanges = false;
+	
+	private Object mSviewCoverManagerInstance = null;
+	
+	// Debug stuff
+	private TextToSpeech mTTS = null;
 	
 	private enum MusicServiceCommands {
 		PLAY_PAUSE,
@@ -115,6 +124,65 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 	}
 	
 	public void handleLoadPackage(LoadPackageParam lpparam) throws Throwable {
+		// Spotify has no API, and the source code is obfuscated, the only thing
+		// we can hook onto reliably is the widget.
+		if (lpparam.packageName.equals(Common.SPOTIFY_PACKAGE_NAME)) {
+			try {
+				Class<?> SpotifyWidget = XposedHelpers.findClass(Common.SPOTIFY_PACKAGE_NAME + ".widget.SpotifyWidget", lpparam.classLoader);
+				findAndHookMethod(SpotifyWidget, "onReceive", Context.class, Intent.class, new XC_MethodHook() {
+					@Override
+					protected void beforeHookedMethod(MethodHookParam param)
+							throws Throwable {
+						
+						final Context context = (Context) param.args[0];
+						
+						Intent intent = (Intent) param.args[1];
+						if (intent != null) {
+							if ("android.appwidget.action.APPWIDGET_UPDATE".equals(intent.getAction())) {
+								Bundle extras = intent.getExtras();
+								if (extras != null) {
+									if (!intent.hasExtra("track_uri"))
+										return;
+									
+									String trackName = "";
+									String artistName = "";
+									
+									if (extras.containsKey("track_name"))
+										trackName = extras.getString("track_name", "");
+									
+									if (extras.containsKey("artist_name"))
+										artistName = extras.getString("artist_name");
+									
+									boolean paused = intent.getBooleanExtra("paused", true);
+									Bitmap cover = ((Bitmap) intent.getParcelableExtra("cover"));
+									
+									if (cover == null)
+										cover = BitmapFactory.decodeResource(modRes, R.drawable.appce_ic_music);
+									
+									if (mUserDebugMode) {
+										XposedBridge.log("Spotify metadata update start");
+										XposedBridge.log("Track title: " + trackName);
+										XposedBridge.log("Artist name: " + artistName);
+										XposedBridge.log("Playing?: " + String.valueOf(!paused));
+										XposedBridge.log("Spotify metadata update end");
+									}
+										
+									Intent broadcastIntent = new Intent(Common.SPOTIFY_METACHANGED_INTENT);
+									broadcastIntent.putExtra("track", trackName);
+									broadcastIntent.putExtra("artist", artistName);
+									broadcastIntent.putExtra("albumArtBitmap", cover);
+									broadcastIntent.putExtra("isPlaying", !paused);
+									context.sendBroadcast(broadcastIntent);
+								}
+							}
+						}
+					}
+				});
+			} catch (ClassNotFoundError e) {
+				XposedBridge.log("Not hoooking Spotify, some update probably broke us.");
+			}
+		}
+		
 		if (!lpparam.packageName.equals("android"))
 			return;
 		
@@ -124,7 +192,8 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		modRes = XModuleResources.createInstance(MODULE_PATH, null);
 		
 		// We need this to use send*AsUser
-		mCurrentUserHandle = (UserHandle) getStaticObjectField(UserHandle.class, "CURRENT");
+		if (mCurrentUserHandle == null)
+			mCurrentUserHandle = (UserHandle) getStaticObjectField(UserHandle.class, "CURRENT");
 		
 		// TODO: Move this somewhere else
 		final OnTouchListener gestureListener = new OnTouchListener() {
@@ -191,6 +260,8 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 						}
 
 						if (isLongClick && mEnableLongPressToToggle) {
+							speakTextIfNeeded("Long pressed, toggling playback");
+							
 							extendTimeout();
 							togglePlayback();
 						}
@@ -202,22 +273,34 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 			}
 
 			private void onSwipeRight() {
-				if (mSwipeTracksOnlyWhilePlaying && !mIsPlaying)
+				if (mSwipeTracksOnlyWhilePlaying && !mIsPlaying) {
+					speakTextIfNeeded("Swiped ignored because no music is playing");
 					return;
+				}
+				
+				speakTextIfNeeded("Swiped right, previous track");
 				
 				previousTrack();
 				extendTimeout();
 			}
 			
 			private void onSwipeLeft() {
-				if (mSwipeTracksOnlyWhilePlaying && !mIsPlaying)
+				if (mSwipeTracksOnlyWhilePlaying && !mIsPlaying) {
+					speakTextIfNeeded("Swiped ignored because no music is playing");
 					return;
+				}
+				
+				speakTextIfNeeded("Swiped left, next track");
 				
 				nextTrack();
 				extendTimeout();
 			}
-			private void onSwipeUp() { }
-			private void onSwipeDown() { }
+			private void onSwipeUp() {
+				speakTextIfNeeded("Swipe up not yet implemented");
+			}
+			private void onSwipeDown() {
+				speakTextIfNeeded("Swipe down not yet implemented");
+			}
 		};
 		
 		XposedBridge.log("Initializing S View hooks...");
@@ -247,6 +330,8 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 					mHandler = (Handler) getObjectField(param.thisObject, "mHandler");
 				if (mGoToSleepRunnable == null)
 					mGoToSleepRunnable = (Runnable) getObjectField(param.thisObject, "mGoToSleepRunnable");
+				
+				mSviewCoverManagerInstance = param.thisObject;
 				
 				registerAndLoadStatus();
 			}
@@ -299,6 +384,84 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 					param.setResult(false);
 			}
 		});
+		
+		if (!Common.PUBLIC_RELEASE) {
+			findAndHookMethod(SViewCoverManager, "updateCoverState", boolean.class, ComponentName.class, new XC_MethodReplacement() {
+				
+				@Override
+				protected Object replaceHookedMethod(MethodHookParam param)
+						throws Throwable {
+					XposedBridge.log("updateCoverState: " + String.valueOf((Boolean) param.args[0]));
+					XposedHelpers.setBooleanField(param.thisObject, "mIsCoverOpen", (Boolean) param.args[0]);
+					boolean mIsCoverOpen = XposedHelpers.getBooleanField(param.thisObject, "mIsCoverOpen");
+					boolean mSuppressCoverUI = XposedHelpers.getBooleanField(param.thisObject, "mSuppressCoverUI");
+					ComponentName paramComponentName = (ComponentName) param.args[1];
+					//Slog.d("SViewCoverManager", "updateCoverState( mIsCoverOpen is " + this.mIsCoverOpen + ")");
+					if (mIsCoverOpen) {
+						if (mHandler != null)
+							mHandler.sendEmptyMessage(0);
+						return null;
+					}
+					
+					if ((mSuppressCoverUI) && (paramComponentName != null)) {
+						String str = paramComponentName.getPackageName();
+						if (str != null)
+							XposedBridge.log(str);
+						if ((str != null)
+								&& (!"com.sec.android.app.clockpackage".equals(str))
+								&& (!"com.android.phone".equals(str))
+								&& (!"com.sec.imsphone".equals(str))
+								&& (!"com.android.calendar".equals(str))
+								&& (!"com.mohammadag.azlyricsviewer".equals(str))) {
+							XposedHelpers.setBooleanField(param.thisObject, "mSuppressCoverUI", false);
+					  }
+					}
+					if (mHandler != null)
+						mHandler.sendEmptyMessage(2);
+					
+					return null;
+				}
+			});
+		}
+	}
+	
+	private void initializeTTS(Context context) {
+		if (context == null)
+			return;
+		
+		mTTS = new TextToSpeech(context, null);
+	}
+	
+	private void speakTextIfNeeded(String text) {
+		if (mUserDebugMode)
+			speakText(text);
+	}
+	
+	private void speakText(String text) {
+		if (mTTS == null)
+			initializeTTS(mContext);
+		
+		if (mTTS == null)
+			return;
+		
+		mTTS.speak(text, TextToSpeech.QUEUE_FLUSH, null);
+	}
+	
+	private void showSViewScreen(boolean show) {
+		if (Common.PUBLIC_RELEASE)
+			return;
+		
+		XposedBridge.log("showSViewScreen");
+		if (mHandler == null)
+			return;
+		
+		if (show) {
+			XposedHelpers.callMethod(mSviewCoverManagerInstance, "updateSupressCover", false);
+			mHandler.sendEmptyMessage(2);
+		} else {
+			XposedHelpers.callMethod(mSviewCoverManagerInstance, "updateSupressCover", true);
+			mHandler.sendEmptyMessage(0);
+		}
 	}
 	
 	// One time instructions, not used at the moment.
@@ -342,12 +505,16 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 	}
 
 	private void loadSettings() {
-		mEnableLongPressToToggle = prefs.getBoolean(Common.SETTINGS_LONGPRESS_KEY, false);
+		mEnableLongPressToToggle = prefs.getBoolean(Common.SETTINGS_LONGPRESS_KEY, true);
 		mLongPressTimeout = Integer.parseInt(prefs.getString(Common.SETTINGS_LONGPRESS_TIMEOUT_KEY,
 				String.valueOf(Common.DEFAULT_LONG_PRESS_TIME_MS)));
 		
-		mCurrentMediaPlayer = prefs.getString(Common.SETTINGS_MEDIAPLAYER_KEY, Common.POWERAMP_MEDIAPLAYER);
+		mCurrentMediaPlayer = prefs.getString(Common.SETTINGS_MEDIAPLAYER_KEY, Common.DEFAULT_MEDIAPLAYER);
 		mSwipeTracksOnlyWhilePlaying = prefs.getBoolean(Common.SETTINGS_SWIPE_ONLY_WHEN_PLAYING_KEY, false);
+		mUserDebugMode = prefs.getBoolean(Common.SETTINGS_USERDEBUG_KEY, false);
+		
+		if (mUserDebugMode)
+			initializeTTS(mContext);
 		
 		//mShouldShowLongPressInstructions = !prefs.getBoolean(Common.SETTINGS_DID_WE_SHOW_LONG_PRESS_INSTRUCTIONS, false);
 	}
@@ -373,7 +540,7 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 			
 			try {
 				Method postDelayedMethod = mHandler.getClass().getMethod("postDelayed", Runnable.class, long.class);
-				postDelayedMethod.invoke(mHandler, mGoToSleepRunnable, (long)8000);
+				postDelayedMethod.invoke(mHandler, mGoToSleepRunnable, Common.DEFAULT_SVIEW_SCREEN_TIMEOUT);
 			} catch (Exception e) {
 				e.printStackTrace();
 			}
@@ -383,12 +550,12 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 	private String getTextToSet(String title, String artist) {
 		String localTitle = title;
 		String localArtist = artist;
-		if (title.isEmpty())
+		if (title == null || title.isEmpty())
 			localTitle = "Unknown title";
-		if (artist.isEmpty())
+		if (artist == null || artist.isEmpty())
 			localArtist = "Unknown artist";
 		
-		if (title.isEmpty() && artist.isEmpty())
+		if ((title == null || title.isEmpty()) && (artist == null || artist.isEmpty()))
 			return "";
 		
 		return localTitle + " - " + localArtist;
@@ -442,7 +609,7 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 	// Sets the internal fields in the S-View classes to the values we have
 	// in our current class.
 	private void updateRemoteFieldsFromLocalFields() {
-		if (mCurrentMediaPlayer.equals(Common.SAMSUNG_MEDIAPLAYER))
+		if (Common.SAMSUNG_MEDIAPLAYER.equals(mCurrentMediaPlayer))
 			return;
 		
 		setTrackTitleText(getTextToSet(mTrackTitleString, mArtistNameString));
@@ -481,8 +648,31 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		iF.addAction("com.samsung.sec.android.MusicPlayer.metachanged");
 		iF.addAction("com.andrew.apollo.metachanged");
 		iF.addAction("com.android.music.playstatechanged");
+		iF.addAction(Common.SPOTIFY_METACHANGED_INTENT);
 		
 		mContext.registerReceiver(metadataChangedReceiver, iF);
+		
+		if (mUserDebugMode)
+			initializeTTS(mContext);
+		
+		if (Common.PUBLIC_RELEASE)
+			return;
+		IntentFilter iF2 = new IntentFilter();
+		iF.addAction("com.mohammadag.sviewpowerampmetadata.SHOW_SVIEW_SCREEN");
+		iF.addAction("com.mohammadag.sviewpowerampmetadata.HIDE_SVIEW_SCREEN");
+		
+		mContext.registerReceiver(new BroadcastReceiver() {
+
+			@Override
+			public void onReceive(Context arg0, Intent intent) {
+				if ("com.mohammadag.sviewpowerampmetadata.SHOW_SVIEW_SCREEN".equals(intent.getAction())) {
+					showSViewScreen(true);
+				} else if ("com.mohammadag.sviewpowerampmetadata.HIDE_SVIEW_SCREEN".equals(intent.getAction())) {
+					showSViewScreen(false);
+				}
+			}
+			
+		}, iF2);
 	}
 	
 	// Although Poweramp uses one of the intents registered to this receiver,
@@ -511,6 +701,13 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 					artist = intent.getStringExtra("artist");
 				
 				setTrackMetadata(title, artist);
+				if (Common.SPOTIFY_METACHANGED_INTENT.equals(intent.getAction()) && mCurrentMediaPlayer.equals(Common.SPOTIFY_MEDIAPLAYER)) {
+					mIsPlaying = intent.getBooleanExtra("isPlaying", false);
+					Bitmap cover = intent.getParcelableExtra("albumArtBitmap");
+					setAlbumArt(cover);
+					updateRemoteFieldsFromLocalFields();
+					return;
+				}
 				// Attempt to load album art from either Google Play Music or MediaStore.
 				Bitmap bitmap = getAlbumart(context, intent.getLongExtra("albumId", -1), Common.GOOGLE_PLAY_CONTENT_PROVIDER_URI);
 				if (bitmap == null)
@@ -674,6 +871,8 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 			sendMediaButton(KeyEvent.KEYCODE_MEDIA_NEXT);
 		} else if (mCurrentMediaPlayer.equals(Common.SAMSUNG_MEDIAPLAYER)) {
 			sendMusicServiceCommand(Common.SAMSUNG_MEDIAPLAYER, MusicServiceCommands.NEXT);
+		} else if (mCurrentMediaPlayer.equals(Common.SPOTIFY_MEDIAPLAYER)) {
+			sendBroadcastAsUser(new Intent("com.spotify.mobile.android.ui.widget.NEXT"), mCurrentUserHandle);
 		}
 	}
 	
@@ -691,6 +890,8 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 			sendMediaButton(KeyEvent.KEYCODE_MEDIA_PREVIOUS);
 		} else if (mCurrentMediaPlayer.equals(Common.SAMSUNG_MEDIAPLAYER)) {
 			sendMusicServiceCommand(Common.SAMSUNG_MEDIAPLAYER, MusicServiceCommands.PREVIOUS);
+		} else if (mCurrentMediaPlayer.equals(Common.SPOTIFY_MEDIAPLAYER)) {
+			sendBroadcastAsUser(new Intent("com.spotify.mobile.android.ui.widget.PREVIOUS"), mCurrentUserHandle);
 		}
 	}
 	
@@ -708,6 +909,8 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 			sendMediaButton(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE);
 		} else if (mCurrentMediaPlayer.equals(Common.SAMSUNG_MEDIAPLAYER)) {
 			sendMusicServiceCommand(Common.SAMSUNG_MEDIAPLAYER, MusicServiceCommands.PLAY_PAUSE);
+		} else if (mCurrentMediaPlayer.equals(Common.SPOTIFY_MEDIAPLAYER)) {
+			sendBroadcastAsUser(new Intent("com.spotify.mobile.android.ui.widget.PLAY"), mCurrentUserHandle);
 		}
 	}
 	
