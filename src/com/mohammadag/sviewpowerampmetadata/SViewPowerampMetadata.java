@@ -183,6 +183,11 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 			}
 		}
 		
+		if (lpparam.packageName.equals(Common.PACKAGE_NAME)) {
+			findAndHookMethod(SettingsActivity.class.getName(), lpparam.classLoader,
+					"isModuleActivated", XC_MethodReplacement.returnConstant(true));
+		}
+		
 		if (!lpparam.packageName.equals("android"))
 			return;
 		
@@ -273,7 +278,7 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 			}
 
 			private void onSwipeRight() {
-				if (mSwipeTracksOnlyWhilePlaying && !mIsPlaying) {
+				if (mSwipeTracksOnlyWhilePlaying && !isPlaying()) {
 					speakTextIfNeeded("Swiped ignored because no music is playing");
 					return;
 				}
@@ -285,7 +290,7 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 			}
 			
 			private void onSwipeLeft() {
-				if (mSwipeTracksOnlyWhilePlaying && !mIsPlaying) {
+				if (mSwipeTracksOnlyWhilePlaying && !isPlaying()) {
 					speakTextIfNeeded("Swiped ignored because no music is playing");
 					return;
 				}
@@ -425,6 +430,21 @@ public class SViewPowerampMetadata implements IXposedHookLoadPackage, IXposedHoo
 		}
 	}
 	
+	protected boolean isPlaying() {
+		if (Common.SAMSUNG_MEDIAPLAYER.equals(mCurrentMediaPlayer)) {
+			boolean isPlaying = false;
+			// The default media player hides the music widget when it's paused,
+			// fall back to that
+			if (mTrackTitle != null) {
+				int visibility = mTrackTitle.getVisibility();
+				isPlaying = (visibility == View.VISIBLE);
+			}
+			
+			return isPlaying;
+		}
+		return mIsPlaying;
+	}
+
 	private void initializeTTS(Context context) {
 		if (context == null)
 			return;

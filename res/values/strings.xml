@@ -14,4 +14,16 @@
     <string name="pref_description_swipe_only_while_playing">When ticked, swiping left/right will only change tracks while music is playing</string>
     <string name="pref_title_user_debug_mode">Debug mode</string>
     <string name="pref_description_user_debug_mode">The device will speak what this application is registering in terms of gestures</string>
+    <string name="pref_title_show_in_launcher">Show icon in launcher</string>
+    <string name="pref_description_show_in_launcher">Disabling this hides the icon from the launcher, open settings by tapping the module in Xposed Installer</string>
+    <string name="error_xposed_not_installed">Xposed not installed</string>
+    <string name="error_no_xposed_description">This modification requires Xposed Framework to be installed, click Install to open a page with instructions on how to install it</string>
+    <string name="button_text_install">Install</string>
+    <string name="button_text_quit">Quit</string>
+    <string name="error_module_not_activated_description">"This module isn't activated in Xposed Installer, tap Open to open Xposed Installer and enable the module"</string>
+    <string name="error_module_not_activated">Module not activated</string>
+    <string name="button_text_open">Open</string>
+    <string name="pref_copyright_title">S-View Music Controls</string>
+    <string name="pref_copyright_description">Copyright © 2013 Mohammad Abu-Garbeyyeh</string>
+    <string name="pref_copyright_description_not_play_store">Copyright © 2013 Mohammad Abu-Garbeyyeh\nClick here to support development</string>
 </resources>

@@ -10,6 +10,9 @@ public class Common {
 	
 	// Static package names
 	public static final String SPOTIFY_PACKAGE_NAME = "com.spotify.mobile.android.ui";
+	public static final String XPOSED_INSTALLER_PACKAGE_NAME = "de.robv.android.xposed.installer";
+	
+	protected static final String XPOSED_INSTALLER_WEBSITE = "http://repo.xposed.info/module/de.robv.android.xposed.installer";
 	
 	// // Intents sent by our package
 	// This intent is sent by our settings activity, this way we don't use prefs.reload()

@@ -1,5 +1,5 @@
 <PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android" >
-    <ListPreference
+    <Preference android:key="copyright_key" android:title="@string/pref_copyright_title" android:summary="@string/pref_copyright_description"/><ListPreference
         android:defaultValue="com.sec.android.app.music"
         android:entries="@array/pref_mediaplayer_list_titles"
         android:entryValues="@array/pref_mediaplayer_list_values"
@@ -10,6 +10,8 @@
     <CheckBoxPreference android:summary="@string/pref_description_longpress" android:title="@string/pref_title_longpress_title" android:key="longpress_to_toggle_playback" android:defaultValue="true"/>
     <EditTextPreference android:key="longpress_timeout" android:title="@string/dialog_longpress_title" android:defaultValue="500" android:dialogMessage="@string/dialog_longpress_message" android:positiveButtonText="@string/action_save" android:dialogTitle="@string/dialog_longpress_title" android:negativeButtonText="@string/action_cancel" android:inputType="number" /><CheckBoxPreference android:key="swipe_only_while_playing" android:title="@string/pref_title_swipe_only_while_playing" android:defaultValue="false" android:summary="@string/pref_description_swipe_only_while_playing"/><CheckBoxPreference android:summary="@string/disable_samsung_updates_description" android:key="disable_samsung_music_updates" android:title="@string/disable_samsung_updates_title"/>
     
-    <CheckBoxPreference android:summary="@string/pref_description_user_debug_mode" android:title="@string/pref_title_user_debug_mode" android:key="user_debug_mode"/>
+    
+    <CheckBoxPreference android:title="@string/pref_title_show_in_launcher" android:summary="@string/pref_description_show_in_launcher" android:key="show_in_launcher" android:defaultValue="true"/><CheckBoxPreference android:summary="@string/pref_description_user_debug_mode" android:title="@string/pref_title_user_debug_mode" android:key="user_debug_mode" />
+    
     
 </PreferenceScreen>
